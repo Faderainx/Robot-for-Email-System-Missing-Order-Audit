@@ -1,0 +1,18 @@
+# 敏感配置
+config.yaml
+
+# 输出文件
+output/
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
