@@ -5,6 +5,11 @@ config.yaml
 output/
 logs/
 
+# GUI 运行时产物 (本机状态/调试截图, 每次运行自动生成)
+session_state.json
+workorder_login.png
+workorder_page.png
+
 # Python
 __pycache__/
 *.pyc
