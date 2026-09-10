@@ -399,6 +399,136 @@ def test_stage2_outputs():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def test_llm_intent_mock():
+    """LLM 邮件分类 + 字段提取: mock 验证协议解析, 默认零成本;
+    设环境变量 MAIL_AUDIT_REAL_LLM=1 会跑 1 次真实请求冒烟 (代价 ~ 几分钱)"""
+    print("== T11 LLM 邮件分类 + 字段提取 (mock 默认, 可选真实冒烟) ==")
+    import os as _os
+    from modules.llm_intent import LLMIntentClient
+
+    client = LLMIntentClient({
+        "api_key": "mock-key", "base_url": "http://mock", "model": "mock",
+        "timeout": 5, "max_tokens": 100,
+    })
+
+    # 1. mock classify_email — 验证协议解析
+    def fake_classify(system, user):
+        return {
+            "is_target": True, "intent": "注册",
+            "email_type": "注册类", "reason": "客户发起WEEE注册",
+        }
+    client._call_api = fake_classify
+    r = client.classify_email("客户咨询WEEE注册", "请尽快处理", [])
+    check("classify: 协议字段齐全",
+          r and r["is_target"] is True and r["intent"] == "注册"
+          and r["email_type"] == "注册类")
+    check("classify: reason 透传", r["reason"] == "客户发起WEEE注册")
+
+    # 2. mock extract_fields_llm — 验证协议 + 多项目拆
+    def fake_extract(system, user):
+        return {
+            "代理": "乐天", "客户": "深圳市甲科技有限公司",
+            "项目": ["德国WEEE", "德国电池法"],
+            "需求": "注册", "confidence": "high",
+        }
+    client._call_api = fake_extract
+    f = client.extract_fields_llm("乐天+甲科技+WEEE注册", "", [], "agent@leko.com")
+    check("extract: 字段映射",
+          f["代理"] == "乐天" and f["客户"] == "深圳市甲科技有限公司"
+          and f["项目"] == ["德国WEEE", "德国电池法"]
+          and f["需求"] == "注册" and f["confidence"] == "high")
+
+    # 3. mock 失败 (返回 None) → 上层走空结果, 不崩
+    client._call_api = lambda *a, **k: None
+    r2 = client.classify_email("x", "y", [])
+    check("classify 失败: 返回 None", r2 is None)
+    f2 = client.extract_fields_llm("x", "y", [])
+    check("extract 失败: 返回 None", f2 is None)
+
+    # 4. 真实冒烟 (可选)
+    if _os.environ.get("MAIL_AUDIT_REAL_LLM") == "1":
+        from openai import OpenAI
+        import yaml as _yaml
+        cfg_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "config.yaml")
+        with open(cfg_path, encoding="utf-8") as _f:
+            llm_cfg = _yaml.safe_load(_f)["llm"]
+        live = LLMIntentClient(llm_cfg)
+        live_resp = live.classify_email("WEEE 注册咨询", "请尽快处理", [])
+        check("真实冒烟: 邮件分类成功",
+              live_resp is not None and live_resp.get("is_target") is True,
+              f"got {live_resp}")
+    else:
+        check("真实冒烟: 默认跳过(设 MAIL_AUDIT_REAL_LLM=1 启用)", True)
+
+
+def test_llm_fallback_in_field_extractor():
+    """T12: 字段提取 E2 LLM 兜底路径 — 缺字段时调用 LLM, 回填+标记 llm_used"""
+    print("== T12 字段提取 LLM 兜底路径 ==")
+    from modules.field_extractor import FieldExtractor
+    from modules.llm_intent import LLMIntentClient
+
+    # 1. LLM 不可用 → 缺字段直接空结果
+    fx1 = FieldExtractor({}, [], llm_client=None)
+    rows1 = fx1.extract_fields({
+        "subject": "请处理", "body_text": "", "sender_email": "u@x.com",
+        "attachments": [],
+    })
+    check("无 LLM 兜底: llm_used=False", not rows1[0].get("llm_used"))
+    check("无 LLM 兜底: 字段空", rows1[0]["客户"] == "" and rows1[0]["项目"] == "")
+
+    # 2. LLM 可用 + 字段缺失 → 触发 LLM 补字段
+    fake = LLMIntentClient({"api_key": "mock", "base_url": "x", "model": "x"})
+    fake.classify_email = lambda *a, **k: None
+    fake.extract_fields_llm = lambda *a, **k: {
+        "代理": "乐天", "客户": "深圳市甲科技有限公司",
+        "项目": ["法国WEEE"], "需求": "注册", "confidence": "high",
+    }
+    fx2 = FieldExtractor({}, [], llm_client=fake)
+    rows2 = fx2.extract_fields({
+        "subject": "请处理", "body_text": "", "sender_email": "u@x.com",
+        "attachments": [],
+    })
+    check("LLM 兜底: llm_used=True", rows2[0].get("llm_used") is True)
+    check("LLM 兜底: 客户回填", rows2[0]["客户"] == "深圳市甲科技有限公司")
+    check("LLM 兜底: 项目回填", rows2[0]["项目"] == "法国WEEE")
+    check("LLM 兜底: 代理回填", rows2[0]["代理"] == "乐天")
+    check("LLM 兜底: 需求回填", rows2[0]["需求"] == "注册")
+
+    # 3. 字段已由规则提取齐全 → 不调 LLM
+    called = []
+    fake.extract_fields_llm = lambda *a, **k: called.append(1) or {
+        "代理": "", "客户": "", "项目": [], "需求": "", "confidence": "low",
+    }
+    fx3 = FieldExtractor(
+        {"agent1@x.com": {"代理": "乐天", "代理简称": "乐天", "收件人邮箱": "agent1@x.com"}},
+        [],
+        llm_client=fake,
+    )
+    rows3 = fx3.extract_fields({
+        "subject": "乐天+深圳市甲科技有限公司+德国WEEE注册",
+        "body_text": "", "sender_email": "agent1@x.com",
+        "attachments": [],
+    })
+    check("字段齐全: 不调 LLM", not called and len(rows3) > 0)
+    check("字段齐全: 规则结果正确", rows3[0]["客户"] == "深圳市甲科技有限公司"
+          and rows3[0]["项目"] == "德国WEEE" and rows3[0]["代理"] == "乐天")
+
+    # 4. LLM 返回项目是列表 → 拆多行
+    fake.extract_fields_llm = lambda *a, **k: {
+        "代理": "乐天", "客户": "深圳市甲科技有限公司",
+        "项目": ["德国WEEE", "德国电池法"], "需求": "注册", "confidence": "high",
+    }
+    fx4 = FieldExtractor({}, [], llm_client=fake)
+    rows4 = fx4.extract_fields({
+        "subject": "请处理", "body_text": "", "sender_email": "u@x.com",
+        "attachments": [],
+    })
+    check("LLM 多项目: 拆 2 行", len(rows4) == 2)
+    check("LLM 多项目: 项目集合正确",
+          {r["项目"] for r in rows4} == {"德国WEEE", "德国电池法"})
+    check("LLM 多项目: 客户相同", len({r["客户"] for r in rows4}) == 1)
+
+
 def main():
     tests = [
         test_mail_filter,
@@ -411,6 +541,8 @@ def main():
         test_stage2_preprocess,
         test_query_cache_roundtrip,
         test_stage2_outputs,
+        test_llm_intent_mock,
+        test_llm_fallback_in_field_extractor,
     ]
     for t in tests:
         t()
