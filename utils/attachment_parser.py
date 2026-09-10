@@ -111,23 +111,29 @@ def parse_attachment(filepath: str, filename: str) -> Dict:
 
 
 def _parse_excel(filepath: str) -> Dict:
+    import warnings
     from openpyxl import load_workbook
     text_parts = []
     sheets = []
     try:
-        wb = load_workbook(filepath, read_only=True, data_only=True)
-        for ws_name in wb.sheetnames:
-            ws = wb[ws_name]
-            rows_text = []
-            for row in ws.iter_rows(max_row=200, values_only=True):
-                cells = [str(c).strip() if c is not None else "" for c in row]
-                line = " ".join(cells)
-                if line.strip():
-                    rows_text.append(line)
-            sheet_text = "\n".join(rows_text)
-            text_parts.append(sheet_text)
-            sheets.append({"sheet_name": ws_name, "text": sheet_text})
-        wb.close()
+        # openpyxl 在 load 和 iter_rows 期间都会对外部链接/扩展发 UserWarning;
+        # 写到 stderr 时若控制台处于 QuickEdit 选择模式会永久阻塞 worker 线程
+        # → 全程压制 (这些警告无业务价值)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            wb = load_workbook(filepath, read_only=True, data_only=True)
+            for ws_name in wb.sheetnames:
+                ws = wb[ws_name]
+                rows_text = []
+                for row in ws.iter_rows(max_row=200, values_only=True):
+                    cells = [str(c).strip() if c is not None else "" for c in row]
+                    line = " ".join(cells)
+                    if line.strip():
+                        rows_text.append(line)
+                sheet_text = "\n".join(rows_text)
+                text_parts.append(sheet_text)
+                sheets.append({"sheet_name": ws_name, "text": sheet_text})
+            wb.close()
     except Exception as e:
         _get_logger().error(f"解析Excel失败: {e}")
     return {"text_content": "\n".join(text_parts), "sheets": sheets}
