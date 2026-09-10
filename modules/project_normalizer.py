@@ -39,11 +39,23 @@ class ProjectNormalizer:
     def __init__(self, project_table: List[Dict], logger=None):
         """
         project_table: 附件四完整列表
+        支持中文key和英文key:
         [{"项目编号": str, "项目名称": str, "国家": str, "业务类型": str}, ...]
+        或 [{"project_name": str, "country": str, "type": str}, ...]
         """
         self.project_table = project_table
-        self.standard_names = [p["项目名称"] for p in project_table if p.get("项目名称")]
-        self.project_lookup = {p["项目名称"]: p for p in project_table if p.get("项目名称")}
+
+        def _get_name(p):
+            return p.get("项目名称") or p.get("project_name") or ""
+
+        def _get_country(p):
+            return p.get("国家") or p.get("country") or ""
+
+        def _get_type(p):
+            return p.get("业务类型") or p.get("type") or ""
+
+        self.standard_names = [_get_name(p) for p in project_table if _get_name(p)]
+        self.project_lookup = {_get_name(p): p for p in project_table if _get_name(p)}
         self.logger = logger
 
         self.project_candidates = [
