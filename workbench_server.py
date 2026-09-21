@@ -409,6 +409,33 @@ def _workorder_detail_tuple(row: Dict[str, Any]) -> Tuple[str, str, str, str, st
     return (*mail, company, project, request)
 
 
+def _mail_number_from_row(row: Dict[str, Any]) -> str:
+    """Return the persisted public mail number, with a deterministic legacy fallback."""
+    existing = _text(row.get("mail_number") or row.get("邮件编号"))
+    if existing:
+        return existing
+    mail_key = _text(row.get("_db_mail_key"))
+    if mail_key:
+        return f"MAIL-{mail_key.upper()}"
+    identity = "|".join(_mail_identity_tuple(row))
+    if not identity.strip("|"):
+        return ""
+    return f"MAIL-{hashlib.sha1(identity.encode('utf-8', errors='ignore')).hexdigest()[:24].upper()}"
+
+
+def _detail_number_from_row(row: Dict[str, Any]) -> str:
+    """Return the persisted public detail number, with a deterministic fallback."""
+    existing = _text(row.get("detail_number") or row.get("明细编号"))
+    if existing:
+        return existing
+    key = _text(row.get("_db_record_key") or row.get("_id"))
+    if not key:
+        key = hashlib.sha1(
+            "|".join(_workorder_detail_tuple(row)).encode("utf-8", errors="ignore")
+        ).hexdigest()[:24]
+    return f"DETAIL-{key.upper()}"
+
+
 def _obvious_business_issues(row: Dict[str, Any]) -> List[dict]:
     """Return only high-confidence company-name anomalies for legacy rows.
 
@@ -922,6 +949,8 @@ class WorkbenchStore:
             saved = saved_records.get(legacy_id, {}) if legacy_id else {}
         if not isinstance(saved, dict):
             saved = {}
+        detail_number = _detail_number_from_row(row)
+        mail_number = _mail_number_from_row(row)
         fields = self._base_fields(row)
         fields.update(saved.get("fields", {}) if isinstance(saved.get("fields"), dict) else {})
         status = self._status(row, saved)
@@ -974,6 +1003,8 @@ class WorkbenchStore:
             })
         return {
             "id": rid,
+            "detail_number": detail_number,
+            "mail_number": mail_number,
             "source": row.get("_source", ""),
             "row_number": row.get("_row_number"),
             "status": status,
@@ -1023,7 +1054,15 @@ class WorkbenchStore:
             },
             "data_source": _text(row.get("数据来源")),
             "initial_row": {k: _text(v) for k, v in row.items() if not k.startswith("_")},
-            "events": saved.get("events", []) if isinstance(saved.get("events"), list) else [],
+            "events": [
+                {
+                    **event,
+                    "mail_number": _text(event.get("mail_number")) or mail_number,
+                    "detail_number": _text(event.get("detail_number")) or detail_number,
+                }
+                for event in (saved.get("events", []) if isinstance(saved.get("events"), list) else [])
+                if isinstance(event, dict)
+            ],
         }
 
     @staticmethod
@@ -1080,8 +1119,22 @@ class WorkbenchStore:
         }
         events = [{"at": created, "action": "add_project", "label": "人工新增项目", "reason": note}]
         events.extend(saved.get("events") if isinstance(saved.get("events"), list) else [])
+        detail_number = _detail_number_from_row({"_id": rid, "_db_record_key": rid})
+        mail_number = _text(mail.get("mail_number")) or _mail_number_from_row({
+            "sender": mail.get("sender"), "date": mail.get("date"), "subject": mail.get("subject"),
+        })
+        events = [
+            {
+                **event,
+                "mail_number": _text(event.get("mail_number")) or mail_number,
+                "detail_number": _text(event.get("detail_number")) or detail_number,
+            }
+            for event in events if isinstance(event, dict)
+        ]
         return {
             "id": rid,
+            "detail_number": detail_number,
+            "mail_number": mail_number,
             "source": "人工新增",
             "row_number": None,
             "status": status,
@@ -1226,6 +1279,11 @@ class WorkbenchStore:
             for item in details if isinstance(item, dict)
             and _text((item.get("fields") or {}).get("program"))
         ))
+        detail_numbers = list(dict.fromkeys(
+            _text(item.get("detail_number") or item.get("id"))
+            for item in details if isinstance(item, dict)
+            and _text(item.get("detail_number") or item.get("id"))
+        ))
         status = _text(mail.get("status")) or "review"
         workorder = mail.get("workorder_summary") if isinstance(mail.get("workorder_summary"), dict) else {}
         if int(workorder.get("total") or 0) and not int(workorder.get("pending") or 0):
@@ -1238,6 +1296,8 @@ class WorkbenchStore:
                 f"待核对 {int(workorder.get('pending') or 0)} 条"
             )
         return {
+            "mail_number": _text(mail.get("mail_number") or mail.get("id")),
+            "detail_numbers": "；".join(detail_numbers),
             "mail_date": _text(mail.get("date")),
             "sender": _text(mail.get("sender")),
             "recipient": _text(mail.get("recipient")),
@@ -1263,12 +1323,16 @@ class WorkbenchStore:
             if not isinstance(detail, dict):
                 continue
             detail_id = _text(detail.get("id"))
+            detail_number = _text(detail.get("detail_number")) or detail_id
+            mail_number = _text(mail.get("mail_number")) or _text(mail.get("id"))
             for raw in detail.get("events") or []:
                 if not isinstance(raw, dict):
                     continue
                 events.append({
                     "signature": _event_signature(detail_id, raw),
                     "detail_id": detail_id,
+                    "detail_number": detail_number,
+                    "mail_number": mail_number,
                     "at": _text(raw.get("at")),
                     "action": _text(raw.get("action")),
                     "label": _text(raw.get("label")),
@@ -1278,9 +1342,12 @@ class WorkbenchStore:
             if not isinstance(raw, dict):
                 continue
             detail_id = f"mail:{_text(mail.get('id'))}"
+            mail_number = _text(mail.get("mail_number")) or _text(mail.get("id"))
             events.append({
                 "signature": _event_signature(detail_id, raw),
                 "detail_id": detail_id,
+                "detail_number": "",
+                "mail_number": mail_number,
                 "at": _text(raw.get("at")),
                 "action": _text(raw.get("action")),
                 "label": _text(raw.get("label")),
@@ -1295,7 +1362,7 @@ class WorkbenchStore:
         ws = wb.active
         ws.title = title
         headers = [
-            "邮件日期", "邮件标题", "发件人", "收件人", "业务明细数", "客户公司",
+            "邮件编号", "业务明细编号", "邮件日期", "邮件标题", "发件人", "收件人", "业务明细数", "客户公司",
             "服务项目", "当前状态", "处理结果", "工单核对结果", "已找到数", "未找到数", "待核对数", "工单查询时间", "最后操作", "最后操作时间",
             "最近原因", "首次归档时间", "最后更新时间", "来源", "附件名称",
         ]
@@ -1308,6 +1375,8 @@ class WorkbenchStore:
             mail_date = _mail_date_sort_value(item.get("mail_date"))
             mail_value: Any = mail_date if mail_date != datetime.min else _text(item.get("mail_date"))
             ws.append([
+                _text(item.get("mail_number")),
+                _text(item.get("detail_numbers")),
                 mail_value,
                 _text(item.get("subject")),
                 _text(item.get("sender")),
@@ -1332,7 +1401,7 @@ class WorkbenchStore:
             ])
         for row in ws.iter_rows(min_row=2, max_col=1):
             row[0].number_format = "yyyy-mm-dd hh:mm:ss"
-        widths = [20, 46, 28, 28, 12, 34, 28, 18, 18, 34, 12, 12, 12, 20, 20, 20, 34, 20, 20, 16, 38]
+        widths = [30, 62, 20, 46, 28, 28, 12, 34, 28, 18, 18, 34, 12, 12, 12, 20, 20, 20, 34, 20, 20, 16, 38]
         for index, width in enumerate(widths, start=1):
             ws.column_dimensions[get_column_letter(index)].width = width
         ws.freeze_panes = "A2"
@@ -1374,6 +1443,7 @@ class WorkbenchStore:
                 continue
             history_mails.append({
                 "id": _text(filtered.get("id")),
+                "mail_number": _text(filtered.get("mail_number")),
                 "sender": _text(filtered.get("sender")),
                 "date": _text(filtered.get("date")),
                 "subject": _text(filtered.get("subject")),
@@ -1488,6 +1558,7 @@ class WorkbenchStore:
                 )
                 filtered_mails.append({
                     "id": filtered_id,
+                    "mail_number": _mail_number_from_row(row),
                     "sender": _text(row.get("发件人邮箱")),
                     "recipient": _text(row.get("收件人")) or _text(row.get("收件人邮箱")),
                     "date": _text(row.get("发件日期")),
@@ -1531,6 +1602,7 @@ class WorkbenchStore:
                 if key not in groups:
                     groups[key] = {
                         "id": hashlib.sha1("|".join(key).encode("utf-8", errors="ignore")).hexdigest()[:16],
+                        "mail_number": _text(item.get("mail_number")) or _mail_number_from_row(item),
                         "sender": item["sender"],
                         "recipient": item.get("recipient", ""),
                         "date": item["date"],
@@ -1554,6 +1626,7 @@ class WorkbenchStore:
                     continue
                 groups[key] = {
                     "id": mail_id,
+                        "mail_number": _text(meta_raw.get("mail_number")) or _mail_number_from_row(meta_raw),
                         "sender": meta["sender"],
                         "recipient": _text(meta_raw.get("recipient")),
                         "date": meta["date"],
@@ -1623,6 +1696,7 @@ class WorkbenchStore:
                     continue
                 manual_filtered.append({
                     "id": mail["id"],
+                    "mail_number": _text(mail.get("mail_number")),
                     "sender": mail["sender"],
                     "recipient": mail.get("recipient", ""),
                     "date": mail["date"],
@@ -1832,6 +1906,8 @@ class WorkbenchStore:
                     "action": "bulk_confirm",
                     "label": "批量人工确认整理完成",
                     "reason": reason,
+                    "mail_number": _text(mail.get("mail_number")),
+                    "detail_number": _text(detail.get("detail_number")) or _text(detail.get("id")),
                 })
                 entry["updated_at"] = _now()
                 confirmed_details += 1
@@ -1851,7 +1927,8 @@ class WorkbenchStore:
 
     @staticmethod
     def _write_route_event(
-        state: Dict[str, Any], mail_id: str, route: str, label: str, reason: str
+        state: Dict[str, Any], mail_id: str, route: str, label: str, reason: str,
+        mail_number: str = "",
     ) -> None:
         routes = state.setdefault("mail_routes", {})
         if not isinstance(routes, dict):
@@ -1870,6 +1947,7 @@ class WorkbenchStore:
             "action": "move_to_filtered" if route == "filtered" else "move_to_review",
             "label": label,
             "reason": reason,
+            "mail_number": _text(mail_number) or f"MAIL-{_text(mail_id).upper()}",
         }
         events.append(event)
         entry.update({"route": route, "at": event["at"], "reason": reason})
@@ -1885,7 +1963,7 @@ class WorkbenchStore:
         else:
             label = "转入询单复核"
             reason = reason or "人工恢复：需要进入询单复核"
-        self._write_route_event(state, mail_id, route, label, reason)
+        self._write_route_event(state, mail_id, route, label, reason, _text(payload.get("mail_number")))
         _save_json(self.state_path, state)
         return {"ok": True, "message": label}
 
@@ -1899,8 +1977,9 @@ class WorkbenchStore:
         if len(mail_ids) > 200:
             raise ValueError("一次最多批量处理200封邮件")
         reason = _text(payload.get("reason")) or "批量人工确认：不进入询单复核"
+        numbers = payload.get("mail_numbers") if isinstance(payload.get("mail_numbers"), dict) else {}
         for mail_id in mail_ids:
-            self._write_route_event(state, mail_id, "filtered", "批量转为已过滤邮件", reason)
+            self._write_route_event(state, mail_id, "filtered", "批量转为已过滤邮件", reason, _text(numbers.get(mail_id)))
         _save_json(self.state_path, state)
         return {"ok": True, "message": f"已将{len(mail_ids)}封邮件转入已过滤邮件", "count": len(mail_ids)}
 
@@ -1915,8 +1994,9 @@ class WorkbenchStore:
         if len(mail_ids) > 200:
             raise ValueError("一次最多批量处理200封邮件")
         reason = _text(payload.get("reason")) or "批量人工确认：恢复询单复核"
+        numbers = payload.get("mail_numbers") if isinstance(payload.get("mail_numbers"), dict) else {}
         for mail_id in mail_ids:
-            self._write_route_event(state, mail_id, "review", "批量转入询单复核", reason)
+            self._write_route_event(state, mail_id, "review", "批量转入询单复核", reason, _text(numbers.get(mail_id)))
         _save_json(self.state_path, state)
         return {"ok": True, "message": f"已将{len(mail_ids)}封邮件转入询单复核", "count": len(mail_ids)}
 
@@ -1990,6 +2070,8 @@ class WorkbenchStore:
                 "action": "manual_workorder_result",
                 "label": f"人工同步工单结果：{found}",
                 "reason": query_note or match_status,
+                "mail_number": _text(payload.get("mail_number")),
+                "detail_number": _text(payload.get("detail_number")),
             })
             entry["workorder_result"] = result_row
             entry["updated_at"] = now
@@ -2055,6 +2137,8 @@ class WorkbenchStore:
                 "action": "queue_workorder_retry",
                 "label": "已加入工单自动重查队列",
                 "reason": _text(payload.get("reason")) or "漏单重新进入工单核查",
+                "mail_number": _text(payload.get("mail_number")),
+                "detail_number": _text(payload.get("detail_number")),
             })
             entry["updated_at"] = now
         _save_json(self.state_path, state)
@@ -2067,12 +2151,32 @@ class WorkbenchStore:
 
     def _finish_action(self, payload: Dict[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
         """兼容旧 JSON 状态的同时，把每次操作复制到 SQLite 留痕表。"""
+        result = dict(result)
+        mail_id = _text(payload.get("mail_id")) or _text(result.get("mail_id"))
+        record_id = _text(payload.get("record_id")) or _text(result.get("record_id"))
+        mail_number = _text(payload.get("mail_number")) or _text(result.get("mail_number"))
+        detail_number = _text(payload.get("detail_number")) or _text(result.get("detail_number"))
+        if not mail_number and mail_id:
+            mail_number = f"MAIL-{mail_id.upper()}"
+        if not detail_number and record_id:
+            detail_number = f"DETAIL-{record_id.upper()}"
+        audit = {
+            "mail_number": mail_number,
+            "detail_number": detail_number,
+        }
+        if isinstance(payload.get("mail_numbers"), dict):
+            audit["mail_numbers"] = {
+                _text(key): _text(value)
+                for key, value in payload["mail_numbers"].items()
+                if _text(key) and _text(value)
+            }
+        result["audit"] = audit
         if self.database is not None and result.get("ok"):
             try:
                 self.database.record_operation(
                     _text(payload.get("action")),
-                    record_id=_text(payload.get("record_id")) or _text(result.get("record_id")),
-                    mail_id=_text(payload.get("mail_id")),
+                    record_id=record_id,
+                    mail_id=mail_id,
                     reason=_text(payload.get("reason")),
                     result=result,
                     operation_date=_text(payload.get("operation_date")),
@@ -2187,7 +2291,14 @@ class WorkbenchStore:
                 records.pop(rid, None)
                 _save_json(self.state_path, state)
                 return self._finish_action(payload, {"ok": True, "message": "已撤销当前人工复核状态"})
-            entry["events"].append({"at": _now(), "action": action, "label": label, "reason": reason})
+            entry["events"].append({
+                "at": _now(),
+                "action": action,
+                "label": label,
+                "reason": reason,
+                "mail_number": _text(payload.get("mail_number")),
+                "detail_number": _text(payload.get("detail_number")),
+            })
             entry["updated_at"] = _now()
             _save_json(self.state_path, state)
         return self._finish_action(payload, {"ok": True, "message": label})
@@ -2310,7 +2421,7 @@ class WorkbenchStore:
                 for key in row:
                     if not key.startswith("_") and key not in original_headers:
                         original_headers.append(key)
-            required = ["代理", "客户公司名称", "标准化项目名称", "需求"]
+            required = ["邮件编号", "明细编号", "代理", "客户公司名称", "标准化项目名称", "需求"]
             headers = required + [h for h in original_headers if h not in required]
             headers += ["工作台状态", "人工修改原因", "工作台最后操作时间"]
             ws.append(headers)
@@ -2320,6 +2431,8 @@ class WorkbenchStore:
                     reason = events[-1].get("reason", "") if events else ""
                     values = dict(detail.get("initial_row") or {})
                     values.update({
+                        "邮件编号": mail.get("mail_number", ""),
+                        "明细编号": detail.get("detail_number", detail.get("id", "")),
                         "代理": detail["fields"].get("agent", ""),
                         "客户公司名称": detail["fields"].get("company", ""),
                         "标准化项目名称": detail["fields"].get("program", ""),
@@ -2334,11 +2447,11 @@ class WorkbenchStore:
             for idx, header in enumerate(headers, start=1):
                 ws.column_dimensions[chr(64 + idx) if idx <= 26 else "A"].width = min(42, max(14, len(header) + 4))
             log_ws = wb.create_sheet("人工操作记录")
-            log_ws.append(["明细编号", "邮件主题", "操作时间", "操作", "原因"])
+            log_ws.append(["邮件编号", "明细编号", "邮件主题", "操作时间", "操作", "原因"])
             for mail in snap["mails"]:
                 for detail in mail["details"]:
                     for event in detail.get("events") or []:
-                        log_ws.append([detail["id"], mail["subject"], event.get("at", ""), event.get("label", ""), event.get("reason", "")])
+                        log_ws.append([mail.get("mail_number", ""), detail.get("detail_number", detail["id"]), mail["subject"], event.get("at", ""), event.get("label", ""), event.get("reason", "")])
             log_ws.freeze_panes = "A2"
             # 被人工删除的项目不写回主表，但要留痕，便于事后追溯/恢复
             deleted_rows = self._deleted_map(self._state())
@@ -2348,7 +2461,7 @@ class WorkbenchStore:
                 for rid, info in deleted_rows.items():
                     info = info if isinstance(info, dict) else {}
                     del_ws.append([
-                        rid,
+                        _detail_number_from_row({"_id": rid}),
                         info.get("subject", ""),
                         info.get("company", ""),
                         info.get("program", ""),
