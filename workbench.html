@@ -424,13 +424,9 @@
     const needles=(Array.isArray(needle)?needle:[needle]).map(x=>String(x??'').replace(/&nbsp;/gi,' ').replace(/\s+/g,' ').trim()).filter(Boolean).sort((a,b)=>b.length-a.length);
     if(!active||!needles.length)return esc(raw);
     const re=new RegExp(needles.map(escapeRegExp).join('|'),'gi');
-    let cursor=0;
-    const marked=raw.replace(re,(match,offset)=>{
-      const before=esc(raw.slice(cursor,offset));
-      cursor=offset+match.length;
-      return before+`<mark class="evidence-hit">${esc(match)}</mark>`;
-    });
-    return marked+esc(raw.slice(cursor));
+    // replace 会自动保留命中前后的原文；回调只返回当前命中的标记，
+    // 不能手动再拼接前缀或后缀，否则标题、正文和附件名会重复。
+    return raw.replace(re,match=>`<mark class="evidence-hit">${esc(match)}</mark>`);
   }
   function normalizeAttachmentLabel(value){
     let label=String(value??'').replace(/&nbsp;/gi,' ').replace(/\s+/g,' ').trim();
