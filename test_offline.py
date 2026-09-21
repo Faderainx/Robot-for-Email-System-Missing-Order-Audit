@@ -4057,6 +4057,7 @@ def main():
         test_epr_form_labels_are_not_customer_records,
         test_stage1_semantic_routing_and_placeholder_dedupe,
         test_semantic_issue_template_fields,
+        test_weee_category_extraction_and_confirmation,
         test_workbench_add_delete_project,
         test_workbench_bulk_confirm,
         test_workbench_attachment_record_audit,
