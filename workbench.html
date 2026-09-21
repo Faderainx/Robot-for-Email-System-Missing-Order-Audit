@@ -231,31 +231,27 @@
   function fuzzyContains(value,query){const text=searchNorm(value),needle=searchNorm(query);if(!needle)return true;if(text.includes(needle))return true;if(needle.length<2)return false;let cursor=0,matched=0;for(const char of needle){const found=text.indexOf(char,cursor);if(found<0)continue;matched++;cursor=found+1}return matched/needle.length>=0.75}
   function mailDateKey(m){return String(m?.date||'').replace('T',' ').slice(0,10)}
   function dateMatches(m){const date=mailDateKey(m);if(!date)return !app.dateStart&&!app.dateEnd;if(app.dateStart&&date<app.dateStart)return false;if(app.dateEnd&&date>app.dateEnd)return false;return true}
-  function mailSearchFields(m){
-    const detailFields=(m.details||[]).flatMap(d=>{
-      const f=d.fields||{};const evidence=(d.evidence||[]).flatMap(e=>[e.initial,e.accepted,e.label,e.source]);
-      const attachment=(Array.isArray(d.attachment_evidence)?d.attachment_evidence:[]).flatMap(a=>[a.filename,a.text,...(Array.isArray(a.records)?a.records:[]).flatMap(r=>Array.isArray(r.cells)?r.cells:[])]);
-      return [d.id,d.detail_number,f.company,f.customer_code,f.company_code,f.agent,f.country,f.program,f.request,d.source,d.review_hint,...evidence,...attachment];
-    });
-    return [m.mail_number,m.id,m.subject,m.sender,m.recipient,m.date,m.operation_date,m.body,m.raw_body,m.attachments,m.reason,m.intent_status,...detailFields].filter(v=>v!==null&&v!==undefined&&String(v)!=='');
-  }
   function searchScore(m){
     if(!dateMatches(m))return -1;
     const query=String(app.search||'').trim();if(!query)return 0;
     const needle=searchNorm(query);if(!needle)return 0;
-    const fields=mailSearchFields(m).map(searchNorm).filter(Boolean);
-    if(fields.some(v=>v===needle))return 100;
-    if(fields.some(v=>v.includes(needle)))return 90;
+    // 搜索框只按邮件标题匹配。发件人、公司、代理、正文、附件和明细
+    // 不再参与匹配，避免搜索词命中邮件内部其他字段后返回错误邮件。
+    const title=searchNorm(m?.subject);
+    if(!title)return 0;
+    if(title===needle)return 100;
+    if(title.includes(needle))return 90;
     const tokens=searchTokens(query);
-    if(tokens.length>1&&tokens.every(token=>fields.some(v=>v.includes(token))))return 80;
-    if(fields.some(v=>fuzzyContains(v,query)))return 30;
+    if(tokens.length>1&&tokens.every(token=>title.includes(token)))return 80;
+    if(fuzzyContains(title,query))return 30;
     return 0;
   }
   function rankSearchResults(mails){
     const query=String(app.search||'').trim();if(!query)return mails;
     const scored=mails.map((mail,index)=>({mail,score:searchScore(mail),index})).filter(item=>item.score>0);
-    const strong=scored.filter(item=>item.score>=80);
-    return (strong.length?strong:scored).sort((a,b)=>b.score-a.score||a.index-b.index).map(item=>item.mail);
+    // 保留所有标题命中结果，强匹配排在前面，不能因为存在一个强匹配
+    // 就把其他标题的模糊命中结果静默隐藏。
+    return scored.sort((a,b)=>b.score-a.score||a.index-b.index).map(item=>item.mail);
   }
   function matchMail(m){
     return searchScore(m)>=0;
