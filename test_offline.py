@@ -2263,7 +2263,7 @@ def test_weee_category_extraction_and_confirmation():
     print("== 德国 WEEE 品牌/品类提取与确认 ==")
     from pathlib import Path
     from openpyxl import Workbook
-    from modules.weee_category_audit import classify_weee_product, extract_weee_items
+    from modules.weee_category_audit import classify_weee_product, compare_weee_categories, extract_weee_items
     import workbench_server as W
 
     classification = classify_weee_product("热交换设备")
@@ -2288,6 +2288,11 @@ def test_weee_category_extraction_and_confirmation():
     )
     check("WEEE 从嵌套 xlsx 预览提取品牌", any(item.get("brand") == "FormiPow" for item in extracted.get("items", [])), extracted)
     check("WEEE 保留原始品类并映射类别", any(item.get("category") == "热交换设备" and item.get("category_class") == "1" for item in extracted.get("items", [])), extracted)
+    table_match = compare_weee_categories(
+        [{"brand": "FormiPow", "category": "热交换设备", "category_class": "1"}],
+        [{"类别": "第一类", "品牌": "FormiPow"}],
+    )
+    check("工单品类明细：中文第一类可与原始品类匹配", table_match.get("status") == "matched", table_match)
 
     tmp = Path(tempfile.mkdtemp())
     try:
