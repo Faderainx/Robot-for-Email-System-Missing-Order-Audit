@@ -288,12 +288,26 @@ def _split_values(value: Any) -> List[str]:
 
 
 def is_germany_weee(project: Any = "", subject: Any = "", body: Any = "", attachments: Any = None) -> bool:
-    """只在明确出现德国与 WEEE 的邮件/项目上启用专项规则。"""
+    """只在明确出现德国 WEEE 服务的邮件/项目上启用专项规则。
+
+    申请表模板经常固定包含“WEEE 产品信息”字样；附件正文命中这段
+    模板说明不能证明本封邮件申请的是 WEEE。已标准化的非 WEEE 项目
+    （例如“德国包装法”）优先作为排他信号，避免在包装法卡片上显示
+    “德国 WEEE 品类待核对”。
+    """
     project_text = _text(project)
-    text_parts = [project_text, _text(subject), _text(body)]
+    subject_text = _text(subject)
+    body_text = _text(body)
+    # 项目字段一旦明确且不含 WEEE，就不因申请表模板中的通用文字开启专项。
+    if project_text and not WEEE_RE.search(project_text):
+        return False
+
+    # 附件文件名可作为服务声明证据；附件 text_content 不纳入启用判断，
+    # 因为其中往往是整张申请表模板，固定包含 WEEE 标签。
+    text_parts = [project_text, subject_text, body_text]
     for attachment in attachments or []:
         if isinstance(attachment, dict):
-            text_parts.extend((_text(attachment.get("filename")), _text(attachment.get("text_content"))))
+            text_parts.append(_text(attachment.get("filename")))
     text = " ".join(text_parts)
     has_germany = any(
         bool(re.search(r"(?<![A-Za-z])DE(?![A-Za-z])", text, re.I))

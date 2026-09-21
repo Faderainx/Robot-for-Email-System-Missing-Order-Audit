@@ -255,6 +255,20 @@ def test_field_extractor():
         print(f"  正文批量名单提取错误: {bulk_customers}")
         return False
     print("  正文说明句未被当成客户，FX024-FX027 四家公司提取 ✓")
+
+    # 申请表模板里的固定“WEEE 产品信息”不能把德国包装法误判为 WEEE。
+    from modules.weee_category_audit import is_germany_weee
+    packaging_attachment = [{
+        "filename": "德国包装法注册.xlsx",
+        "text_content": "WEEE产品信息在下列填写（需要的服务 必填）",
+    }]
+    if is_germany_weee("德国包装法", bulk_mail["subject"], bulk_mail["body_text"], packaging_attachment):
+        print("  德国包装法被错误开启 WEEE 专项")
+        return False
+    if not is_germany_weee("德国WEEE", "德国WEEE注册", "品牌：X；品类：小型设备", []):
+        print("  德国 WEEE 明确项目未开启专项")
+        return False
+    print("  德国包装法/WEEE 专项边界校验 ✓")
     return True
 
 # ============================================================
