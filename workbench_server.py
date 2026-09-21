@@ -395,7 +395,13 @@ def _is_non_company_customer_value(value: Any) -> bool:
 def _mail_identity_tuple(row: Dict[str, Any]) -> Tuple[str, str, str]:
     """返回用于替换同一封邮件旧版本记录的稳定身份。"""
     sender = _text(row.get("发件人邮箱") or row.get("sender_email") or row.get("sender")).lower()
-    date = _text(row.get("发件日期") or row.get("date")).replace("T", " ")
+    raw_date = _text(row.get("发件日期") or row.get("date"))
+    parsed_date = _mail_date_sort_value(raw_date)
+    date = (
+        parsed_date.strftime("%Y-%m-%d %H:%M:%S")
+        if parsed_date != datetime.min
+        else raw_date.replace("T", " ")
+    )
     subject = _text(row.get("邮件主题") or row.get("主题") or row.get("subject"))
     return sender, date, subject
 
@@ -1432,13 +1438,15 @@ class WorkbenchStore:
         now = _now()
 
         normal_keys = {
-            (_text(mail.get("sender")), _text(mail.get("date")), _text(mail.get("subject")))
+            self._mail_identity(mail.get("sender"), mail.get("date"), mail.get("subject"))
             for mail in mails
         }
         history_mails = list(mails)
         # 已在询单复核队列的过滤候选由其队列状态记录，避免同一封邮件双份入账。
         for filtered in filtered_mails:
-            key = (_text(filtered.get("sender")), _text(filtered.get("date")), _text(filtered.get("subject")))
+            key = self._mail_identity(
+                filtered.get("sender"), filtered.get("date"), filtered.get("subject")
+            )
             if key in normal_keys:
                 continue
             history_mails.append({
@@ -1710,8 +1718,46 @@ class WorkbenchStore:
                     "source": "人工过滤",
                     "route_events": route.get("events") if isinstance(route.get("events"), list) else [],
                 })
+            # 阶段一过滤日志是持久化累积表，旧版本可能在后续刷新中仍存在；
+            # 同一封邮件如果已经出现在当前询单队列，就不能再在“已过滤邮件”中
+            # 计数一次。这里按发件人+规范化日期+主题去重，避免出现“总邮件数
+            # 275，但询单复核 121 + 已过滤 156 = 277”的重叠统计。
+            current_mail_keys = {
+                self._mail_identity(mail.get("sender"), mail.get("date"), mail.get("subject"))
+                for mail in active_mails
+                if _text(mail.get("sender")) or _text(mail.get("date")) or _text(mail.get("subject"))
+            }
+            deduped_filtered: List[Dict[str, Any]] = []
+            seen_filtered = set()
+            overlap_removed = 0
+            # 人工路由优先于阶段一旧过滤日志，保留人工操作人的原因和时间。
+            manual_keys = set()
+            for item in manual_filtered:
+                key = self._mail_identity(item.get("sender"), item.get("date"), item.get("subject"))
+                has_identity = any(key)
+                dedup_key = key if has_identity else ("id", _text(item.get("id")))
+                if has_identity and key in current_mail_keys:
+                    overlap_removed += 1
+                    continue
+                if dedup_key in seen_filtered:
+                    continue
+                seen_filtered.add(dedup_key)
+                if has_identity:
+                    manual_keys.add(key)
+                deduped_filtered.append(item)
+            for item in filtered_mails:
+                key = self._mail_identity(item.get("sender"), item.get("date"), item.get("subject"))
+                has_identity = any(key)
+                dedup_key = key if has_identity else ("id", _text(item.get("id")))
+                if has_identity and (key in current_mail_keys or key in manual_keys):
+                    overlap_removed += 1
+                    continue
+                if dedup_key in seen_filtered:
+                    continue
+                seen_filtered.add(dedup_key)
+                deduped_filtered.append(item)
+            filtered_mails = deduped_filtered
             mails = active_mails
-            filtered_mails.extend(manual_filtered)
             workorder_summaries = self._workorder_summaries()
             for mail in mails:
                 mail["workorder_summary"] = workorder_summaries.get(
@@ -1738,6 +1784,8 @@ class WorkbenchStore:
                 "needs_info": sum(1 for d in all_details if d["status"] == "needs_info"),
                 # 当前过滤页包含阶段一过滤日志及人工转入的邮件。
                 "filtered": len(filtered_mails),
+                "overlap_removed": overlap_removed,
+                "unique_mails": len(mails) + len(filtered_mails),
             }
             history = self._sync_persistent_history(mails, filtered_mails)
             table = project_table_path()
