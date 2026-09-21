@@ -34,7 +34,7 @@ SEP = "=" * 60
 
 results = {}
 
-def test_module(name, func):
+def run_module(name, func):
     print(f"\n{SEP}")
     print(f"测试: {name}")
     print(SEP)
@@ -491,15 +491,15 @@ if __name__ == "__main__":
     print("  邮件漏单审核工具 — 逐模块测试")
     print("=" * 60)
     
-    test_module("T1 邮件读取 M1", test_mail_reader)
-    test_module("T2 邮件过滤 M2", test_mail_filter)
-    test_module("T3 字段提取 M3", test_field_extractor)
-    test_module("T4 项目标准化 M4", test_project_normalizer)
-    test_module("T5 工单系统 M5", test_workorder_checker)
-    test_module("T6 Excel输出 M6", test_excel_writer)
-    test_module("T7 OCR模块", test_ocr)
-    test_module("T8 附件解析", test_attachment_parser)
-    test_module("T9 模糊匹配", test_fuzzy_match)
+    run_module("T1 邮件读取 M1", test_mail_reader)
+    run_module("T2 邮件过滤 M2", test_mail_filter)
+    run_module("T3 字段提取 M3", test_field_extractor)
+    run_module("T4 项目标准化 M4", test_project_normalizer)
+    run_module("T5 工单系统 M5", test_workorder_checker)
+    run_module("T6 Excel输出 M6", test_excel_writer)
+    run_module("T7 OCR模块", test_ocr)
+    run_module("T8 附件解析", test_attachment_parser)
+    run_module("T9 模糊匹配", test_fuzzy_match)
     
     # 汇总
     print("\n" + "=" * 60)

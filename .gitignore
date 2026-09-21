@@ -33,3 +33,4 @@ venv/
 .idea/
 .vscode/
 *.swp
+.playwright-cli/

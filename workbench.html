@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="icon" href="data:," />
   <title>ECOPV · 邮件询单工作台</title>
   <style>
     :root{--nav:#102b36;--nav2:#163d49;--ink:#18313c;--muted:#6b7f88;--line:#dce5e9;--bg:#f3f6f8;--panel:#fff;--green:#087c69;--green2:#e8f5ef;--amber:#9b590b;--warn:#fff3d9;--red:#b13c3c;--red2:#fff0f0;--blue:#1668a5;--shadow:0 8px 24px rgba(17,43,54,.08)}
@@ -11,7 +12,7 @@
   .attachment-link{color:var(--ink);text-decoration:none;border:1px solid #d7e5e8;cursor:pointer}
   .attachment-link:hover{border-color:#72a9a3;background:#e8f5f1}
   .attachment-link small{color:var(--green);margin-left:7px;font-size:10px}
-</style>
+   </style>
   <style>
     .field select{width:100%;border:1px solid var(--line);border-radius:6px;padding:9px;font:inherit;outline:none;background:#fff;color:var(--ink)}
     /* 工作台桌面布局：整页锁定在一个视口内，各内容区独立滚动。 */
@@ -96,6 +97,20 @@
       .queue-list{max-height:420px}
     }
   </style>
+  <style>
+    /* 最终布局覆盖：必须放在旧版工作台样式之后，避免历史 CSS 把拖动分隔条覆盖。 */
+    .work{--queue-w:285px;--evidence-w:335px;grid-template-columns:minmax(220px,var(--queue-w)) 8px minmax(420px,1fr) 8px minmax(320px,var(--evidence-w))!important;gap:0!important}
+    .work>.queue{grid-column:1!important;grid-row:1!important}.work>.detail{grid-column:3!important;grid-row:1!important}.work>.evidence{grid-column:5!important;grid-row:1!important}
+    .work>.splitter[data-splitter="queue"]{grid-column:2!important;grid-row:1!important}.work>.splitter[data-splitter="evidence"]{grid-column:4!important;grid-row:1!important}
+    .splitter{display:block;grid-row:1;align-self:stretch;cursor:col-resize;background:#edf3f5;border-left:1px solid #d5e2e6;border-right:1px solid #d5e2e6;position:relative;z-index:4}
+    .splitter:after{content:"";position:absolute;left:2px;top:50%;width:2px;height:42px;transform:translateY(-50%);border-radius:3px;background:#8ba9b1;box-shadow:3px 0 #8ba9b1}
+    .splitter:hover,.splitter:focus{background:#d9ece8;outline:none}.splitter.dragging{background:#abd5ca}
+    .global-date-range{display:flex;align-items:center;gap:5px;white-space:nowrap;color:var(--muted);font-size:11px;border:1px solid var(--line);border-radius:7px;padding:4px 6px;background:#fbfcfc}
+    .global-date-range label{font-weight:600;color:var(--ink)}.global-date-range input{width:122px;border:1px solid var(--line);border-radius:5px;padding:5px 6px;color:var(--ink);font:inherit;background:#fff}.global-date-range .btn{padding:5px 8px;font-size:11px}
+    .queue-tools .date-tools{display:none}.evidence-hit{scroll-margin-block:45%}
+    @media(max-width:1200px) and (min-width:781px){.work{grid-template-columns:minmax(220px,var(--queue-w)) 8px minmax(300px,1fr) 8px minmax(320px,var(--evidence-w))!important}}
+    @media(max-width:780px){.global-date-range{position:absolute;left:16px;right:16px;top:68px;z-index:5;justify-content:center}.top{position:relative}.work{display:flex!important;gap:0!important}.splitter{display:none}.work>.queue,.work>.detail,.work>.evidence{width:100%;flex:0 0 100%;grid-column:auto!important;grid-row:auto!important}}
+  </style>
 </head>
 <body>
 <div class="shell">
@@ -103,7 +118,6 @@
     <div class="brand">ECOPV ORDER OPERATIONS<small>MAIL AUDIT WORKBENCH</small></div>
     <nav class="nav">
       <button class="active" data-view="inbox"><i>▦</i>询单复核</button>
-      <button data-view="unfinished"><i>!</i>未完成邮件 <span id="unfinished-nav-count" class="nav-count"></span></button>
       <button data-view="missing"><i>⚠</i>漏单邮件 <span id="missing-nav-count" class="nav-count"></span></button>
       <button data-view="filtered"><i>▥</i>已过滤邮件 <span id="filtered-nav-count" class="nav-count"></span></button>
     </nav>
@@ -112,14 +126,16 @@
   <main class="main">
     <header class="top">
       <div><div class="crumb">邮件处理 / 人工复核工作台 · v2026.09.17</div><h1>询单整理与确认</h1></div>
-      <div class="top-actions"><span class="pill ready">本机数据 · 不对外联网</span><span class="pill confirmed" id="history-state">历史留痕读取中</span><button class="btn" id="refresh">刷新数据</button><button class="btn" id="bulk-filter" disabled>转为已过滤（0）</button><button class="btn primary" id="bulk-confirm" disabled>批量确认（0）</button><button class="btn primary" id="export">导出复核结果</button></div>
+      <div class="top-actions"><span class="pill ready">本机数据 · 不对外联网</span><span class="pill confirmed" id="history-state">历史留痕读取中</span><div class="global-date-range" title="三个工作视图统一按邮件日期筛选"><label>邮件日期</label><input type="date" id="date-start" aria-label="开始日期"/><span>至</span><input type="date" id="date-end" aria-label="截至日期"/><button class="btn small" id="clear-date-range">全部</button></div><button class="btn" id="refresh">刷新数据</button><button class="btn" id="bulk-filter" disabled>转为已过滤（0）</button><button class="btn primary" id="bulk-confirm" disabled>批量确认（0）</button><button class="btn primary" id="export">导出复核结果</button></div>
     </header>
     <div class="container">
       <div class="banner"><span id="view-banner"><b>工作方式：</b>系统先读取阶段一输出并展示证据，人工确认后才进入后续工单比对。</span><span class="muted" id="source-path"></span></div>
       <section class="stats" id="stats"></section>
         <section class="work">
-        <aside class="card queue"><div class="card-head"><h2 id="queue-title">询单队列</h2><span class="muted" id="queue-count"></span></div><div class="queue-tools"><input class="search" id="search" placeholder="模糊搜索主题、公司、发件人…"/><div class="date-tools"><label for="operation-date">处理日期</label><input type="date" id="operation-date"/><button class="btn small" id="clear-operation-date">全部</button></div><div class="filters" id="filters"><button class="on" data-filter="all">全部</button><button data-filter="review">待复核</button><button data-filter="ready">可确认</button><button data-filter="confirmed">已确认</button></div><div class="queue-selectbar" id="queue-selectbar"><button class="btn small" id="select-visible">全选当前列表</button><button class="btn small" id="clear-selected">清除选择</button><span class="selected-count" id="selected-count">已选0封</span></div></div><div class="queue-list" id="queue-list"></div></aside>
+        <aside class="card queue"><div class="card-head"><h2 id="queue-title">询单队列</h2><span class="muted" id="queue-count"></span></div><div class="queue-tools"><input class="search" id="search" placeholder="搜索主题、公司、代理、项目、发件人…"/><div class="filters" id="filters"><button class="on" data-filter="all">全部</button><button data-filter="review">待复核</button><button data-filter="ready">待确认</button><button data-filter="confirmed">已完成</button></div><div class="queue-selectbar" id="queue-selectbar"><button class="btn small" id="select-visible">全选当前列表</button><button class="btn small" id="clear-selected">清除选择</button><span class="selected-count" id="selected-count">已选0封</span></div></div><div class="queue-list" id="queue-list"></div></aside>
+        <div class="splitter" data-splitter="queue" role="separator" aria-label="调整询单队列宽度" tabindex="0"></div>
         <section class="card detail" id="detail"></section>
+        <div class="splitter" data-splitter="evidence" role="separator" aria-label="调整字段证据宽度" tabindex="0"></div>
         <aside class="card evidence" id="evidence"></aside>
       </section>
       <div class="footnote">人工确认“整理完成”只表示邮件字段已核对，不等于工单系统已通过审核，也不会自动修改全局代理关系。</div>
@@ -132,13 +148,26 @@
 <datalist id="project-options"></datalist>
 <script>
   const API_BASE=location.protocol==='file:'?'http://127.0.0.1:8765':'';
-  const app={data:null,view:'inbox',filter:'all',search:'',operationDate:'',mailId:null,detailId:null,tab:'details',highlightField:null,detailOrder:{},selectedMailIds:new Set()};
+  const app={data:null,view:'inbox',filter:'all',search:'',dateStart:'',dateEnd:'',mailId:null,detailId:null,tab:'details',highlightField:null,detailOrder:{},selectedMailIds:new Set(),stateFromCache:false};
   const $=s=>document.querySelector(s); const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const statusLabel=s=>({review:'待人工复核',ready:'可确认',confirmed:'已确认',returned:'已退回',needs_info:'待补资料'}[s]||s||'未判定');
+  const statusLabel=s=>({review:'待人工复核',ready:'待确认',confirmed:'已完成',returned:'已退回',needs_info:'待补资料'}[s]||s||'未判定');
   const statusClass=s=>s||'review';
   function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600)}
   async function api(url,opt){const r=await fetch(API_BASE+url,opt);const j=await r.json();if(!j.ok)throw Error(j.error||'操作失败');return j}
-  async function load(){try{app.data=await api('/api/state');render();}catch(e){const hint=location.protocol==='file:'?'请不要直接双击 HTML 文件。先运行项目目录中的“启动人工复核工作台.bat”，或从原 GUI 点击“打开人工复核工作台”。':'请确认工作台服务仍在运行。';$('#detail').innerHTML='<div class="empty">工作台读取失败：'+esc(e.message)+'<br><br>'+esc(hint)+'</div>';toast('无法连接本机工作台服务')}}
+  async function load(){
+    try{const ui=JSON.parse(localStorage.getItem('ecopv-workbench-ui-v1')||'{}');if(typeof ui.dateStart==='string')app.dateStart=ui.dateStart;if(typeof ui.dateEnd==='string')app.dateEnd=ui.dateEnd}catch(_){/* 忽略损坏的界面缓存 */}
+    try{
+      app.data=await api('/api/state');app.stateFromCache=false;
+      try{localStorage.setItem('ecopv-workbench-state-v3',JSON.stringify({saved_at:new Date().toISOString(),data:app.data}))}catch(_){/* 缓存不可写不影响工作台 */}
+      render();
+    }catch(e){
+      let cached=null;try{cached=JSON.parse(localStorage.getItem('ecopv-workbench-state-v3')||'null')?.data}catch(_){cached=null}
+      if(cached?.mails){app.data=cached;app.stateFromCache=true;render();toast('服务暂时不可用，已显示本机缓存；恢复服务后请刷新')}else{
+        const hint=location.protocol==='file:'?'请不要直接双击 HTML 文件。先运行项目目录中的“启动人工复核工作台.bat”，或从原 GUI 点击“打开人工复核工作台”。':'请确认工作台服务仍在运行。';$('#detail').innerHTML='<div class="empty">工作台读取失败：'+esc(e.message)+'<br><br>'+esc(hint)+'</div>';toast('无法连接本机工作台服务')
+      }
+    }
+  }
+  function syncDateInputs(){const start=$('#date-start'),end=$('#date-end');if(start)start.value=app.dateStart;if(end)end.value=app.dateEnd}
   function allDetails(){return (app.data?.mails||[]).flatMap(m=>m.details.map(d=>({...d,_mail:m})))}
   function filteredMails(){return app.data?.filtered_mails||[]}
   function renderBulkButton(){const valid=new Set((app.data?.mails||[]).map(m=>m.id));app.selectedMailIds=new Set([...app.selectedMailIds].filter(id=>valid.has(id)));const n=app.selectedMailIds.size;const b=$('#bulk-confirm');if(b){b.disabled=app.view==='filtered'||n===0;b.textContent=`批量确认（${n}）`}const c=$('#selected-count');if(c)c.textContent=`已选${n}封`;const bar=$('#queue-selectbar');if(bar)bar.style.display=app.view==='filtered'?'none':'flex'}
@@ -146,8 +175,19 @@
   function renderStats(){const c=app.data.counts;$('#stats').innerHTML=[['mails','封邮件',''],['details','条业务明细',''],['review','待人工复核','amber'],['confirmed','已确认交接','green'],['filtered','过滤参考','red']].map(x=>`<div class="stat ${x[2]}"><div class="num">${c[x[0]]??0}</div><div class="label">${x[1]}</div></div>`).join('');$('#filtered-nav-count').textContent=filteredMails().length||''}
   function searchNorm(value){return String(value??'').normalize('NFKC').toLowerCase().replace(/[\s\-_/.,，。:：;；|+()（）【】\[\]{}]+/g,'')}
   function fuzzyContains(value,query){const text=searchNorm(value),needle=searchNorm(query);if(!needle)return true;if(text.includes(needle))return true;if(needle.length<2)return false;let cursor=0,matched=0;for(const char of needle){const found=text.indexOf(char,cursor);if(found<0)continue;matched++;cursor=found+1}return matched/needle.length>=0.75}
-  function mailOperationDate(m){const dates=[m?.operation_date,...(m?.route_events||[]).map(e=>e?.at),...(m?.details||[]).flatMap(d=>(d?.events||[]).map(e=>e?.at)),m?.date].filter(Boolean).map(v=>String(v).replace('T',' ').slice(0,10));return dates.sort().pop()||''}
-  function matchMail(m){if(app.operationDate&&mailOperationDate(m)!==app.operationDate)return false;const q=app.search.trim();if(!q)return true;const fields=app.view==='filtered'?[m.subject,m.sender,m.recipient,m.date,m.body,m.attachments,m.reason,m.intent_status]:[m.subject,m.sender,m.recipient,m.date,...(m.details||[]).flatMap(d=>[d.fields.company,d.fields.agent,d.fields.program,d.fields.request])];return fields.some(field=>fuzzyContains(field,q))||fuzzyContains(fields.join(''),q)}
+  function mailDateKey(m){return String(m?.date||'').replace('T',' ').slice(0,10)}
+  function dateMatches(m){const date=mailDateKey(m);if(!date)return !app.dateStart&&!app.dateEnd;if(app.dateStart&&date<app.dateStart)return false;if(app.dateEnd&&date>app.dateEnd)return false;return true}
+  function matchMail(m){
+    if(!dateMatches(m))return false;
+    const q=app.search.trim();if(!q)return true;
+    const detailFields=(m.details||[]).flatMap(d=>{
+      const f=d.fields||{};const evidence=(d.evidence||[]).flatMap(e=>[e.initial,e.accepted,e.label,e.source]);
+      const attachment=(Array.isArray(d.attachment_evidence)?d.attachment_evidence:[]).flatMap(a=>[a.filename,a.text,...(Array.isArray(a.records)?a.records:[]).flatMap(r=>Array.isArray(r.cells)?r.cells:[])]);
+      return [f.company,f.agent,f.country,f.program,f.request,d.source,d.review_hint,...evidence,...attachment];
+    });
+    const fields=[m.subject,m.sender,m.recipient,m.date,m.operation_date,m.body,m.raw_body,m.attachments,m.reason,m.intent_status,...detailFields];
+    return fields.some(field=>fuzzyContains(field,q))||fuzzyContains(fields.join(''),q)
+  }
   function renderQueue(){
     if(app.view==='filtered'){
       const mails=filteredMails().filter(matchMail);
@@ -183,9 +223,11 @@
   // 队列视图统一从同一份状态计算：未完成邮件可直接处理，不会复制或丢失原邮件。
   function queueMails(){
     if(!app.data)return [];
-    let mails=app.view==='filtered'?filteredMails():(app.view==='missing'?(app.data.missing_mails||[]):(app.data.mails||[]));
-    if(app.view==='unfinished')mails=mails.filter(m=>!mailIsComplete(m));
-    if(app.view==='inbox')mails=mails.filter(m=>app.filter==='all'||m.status===app.filter);
+    // 询单队列和“未完成邮件”使用同一份邮件对象；未完成不再复制成另一页。
+    // 旧链接若仍传入 unfinished，直接兼容为询单队列的全部邮件。
+    const isFiltered=app.view==='filtered',isMissing=app.view==='missing';
+    let mails=isFiltered?filteredMails():(isMissing?(app.data.missing_mails||[]):(app.data.mails||[]));
+    if(!isFiltered&&!isMissing&&app.view!=='unfinished')mails=mails.filter(m=>app.filter==='all'||m.status===app.filter);
     return mails.filter(matchMail);
   }
   function mailIsComplete(m){const w=m?.workorder_summary||{};return m?.status==='confirmed'||(Number(w.total||0)>0&&Number(w.pending||0)===0)}
@@ -222,6 +264,7 @@
   }
   function setHistoryState(){
     const h=app.data?.history||{},node=$('#history-state');if(!node)return;
+    if(app.stateFromCache){node.classList.remove('ready','confirmed','review');node.classList.add('ready');node.textContent='本机缓存 · 待刷新';return}
     node.classList.remove('ready','confirmed','review');
     if(h.enabled){node.classList.add('confirmed');node.textContent=`历史留痕已启用 · 已完成${h.completed_count||0} / 未完成${h.unfinished_count||0}`}
     else{node.classList.add('ready');node.textContent='测试会话 · 不写正式历史'}
@@ -237,16 +280,16 @@
     const bar=$('#queue-selectbar');if(bar)bar.style.display='flex';
   };
   renderStats=function(){
-    const c=app.data?.counts||{},unfinished=(app.data?.mails||[]).filter(m=>!mailIsComplete(m)).length,missing=(app.data?.missing_mails||[]).length;
-    $('#stats').innerHTML=[['mails','封邮件',''],['details','条业务明细',''],['review','待人工复核','amber'],['confirmed','已确认交接','green'],['filtered','过滤参考','red']].map(x=>`<div class="stat ${x[2]}"><div class="num">${c[x[0]]??0}</div><div class="label">${x[1]}</div></div>`).join('');
-    $('#filtered-nav-count').textContent=filteredMails().length||'';
-    $('#unfinished-nav-count').textContent=unfinished||'';
-    $('#missing-nav-count').textContent=missing||'';
+    const active=(app.data?.mails||[]).filter(dateMatches),details=active.flatMap(m=>m.details||[]),filtered=(app.data?.filtered_mails||[]).filter(dateMatches),missing=(app.data?.missing_mails||[]).filter(dateMatches);
+    const c={mails:active.length,details:details.length,review:details.filter(d=>d.status==='review').length,confirmed:details.filter(d=>d.status==='confirmed').length,filtered:filtered.length};
+    $('#stats').innerHTML=[['mails','询单邮件',''],['details','业务明细',''],['review','待人工复核','amber'],['confirmed','已完成明细','green'],['filtered','已过滤邮件','red']].map(x=>`<div class="stat ${x[2]}"><div class="num">${c[x[0]]??0}</div><div class="label">${x[1]}</div></div>`).join('');
+    const filteredCount=$('#filtered-nav-count');if(filteredCount)filteredCount.textContent=filtered.length||'';
+    const missingCount=$('#missing-nav-count');if(missingCount)missingCount.textContent=missing.length||'';
     setHistoryState();
   };
   renderQueue=function(){
     const mails=queueMails(),isFiltered=app.view==='filtered',isUnfinished=app.view==='unfinished',isMissing=app.view==='missing';
-    $('#queue-title').textContent=isFiltered?'已过滤邮件':(isUnfinished?'未完成邮件':(isMissing?'漏单邮件':'询单队列'));
+    $('#queue-title').textContent=isFiltered?'已过滤邮件':(isMissing?'漏单邮件':'询单队列');
     $('#queue-count').textContent=mails.length+' 封';
     $('#filters').style.display=(isFiltered||isUnfinished||isMissing)?'none':'flex';
     if(isFiltered){
@@ -265,6 +308,7 @@
       const actions=document.createElement('div');actions.className='detail-actions';actions.innerHTML='<button class="btn small primary" id="restore-review">转入询单复核</button>';head.appendChild(actions);$('#restore-review').onclick=()=>moveMailToReview(m);return;
     }
     const m=currentMail(),actions=$('#detail .detail-actions');if(!m||!actions)return;decorateDetailMail(m);
+    if(!actions.querySelector('#confirm-business')){const button=document.createElement('button');button.className='btn small primary';button.id='confirm-business';button.textContent='确认当前业务';actions.insertBefore(button,actions.querySelector('#confirm'));button.onclick=()=>doAction('confirm_detail',{},'人工确认：当前业务字段已核对')}
     const button=document.createElement('button');button.className='btn small danger';button.id='move-filter';button.textContent='转为已过滤';actions.appendChild(button);button.onclick=()=>moveMailToFiltered(m);
     if(app.view==='missing'){
       const sync=document.createElement('button');sync.className='btn small primary';sync.id='sync-workorder';sync.textContent='人工同步工单结果';actions.appendChild(sync);sync.onclick=()=>openWorkorderModal(m,currentDetail());
@@ -279,10 +323,10 @@
     const event=(m.route_events||[]).slice(-1)[0];if(event)box.insertAdjacentHTML('beforeend',`<div class="ev-card"><div class="ev-label">最近流转</div><div class="ev-line">${esc(event.label||event.action||'人工操作')}</div><div class="ev-line"><span>时间：</span>${esc(event.at||'未记录')}</div><span class="source">来源：人工流转留痕</span></div>`);
   };
   render=function(){
-    if(!app.data)return;renderStats();renderProjectOptions();
-    const history=app.data.history||{},isFiltered=app.view==='filtered',isUnfinished=app.view==='unfinished',isMissing=app.view==='missing';
-    $('#source-path').textContent=isFiltered?'来源：过滤邮件记录':(isMissing?'来源：漏单.xlsx':(isUnfinished?(history.enabled?'按邮件日期持续留痕':'当前会话未完成邮件'):((app.data.paths?.primary||'').split('\\').pop()||'未找到阶段一输出')));
-    $('#view-banner').innerHTML=isFiltered?'<b>已过滤邮件：</b>规则过滤与人工转入的邮件都在这里保留证据，可随时恢复到询单复核。':(isMissing?'<b>漏单邮件：</b>可人工同步工单结果，或加入自动重查队列；结果按邮件身份回流并保留历史。':(isUnfinished?'<b>未完成邮件：</b>按当前处理状态归集；可继续修正、确认或转入已过滤邮件，所有动作均留痕。':'<b>工作方式：</b>系统先读取阶段一输出并展示证据，人工确认后才进入后续工单比对。'));
+    if(!app.data)return;if(app.view==='unfinished')app.view='inbox';renderStats();renderProjectOptions();
+    const history=app.data.history||{},isFiltered=app.view==='filtered',isMissing=app.view==='missing';
+    $('#source-path').textContent=isFiltered?'来源：过滤邮件记录':(isMissing?'来源：漏单.xlsx':((app.data.paths?.primary||'').split('\\').pop()||'未找到阶段一输出'));
+    $('#view-banner').innerHTML=isFiltered?'<b>已过滤邮件：</b>规则过滤与人工转入的邮件都在这里保留证据，可随时恢复到询单复核。':(isMissing?'<b>漏单邮件：</b>可人工同步工单结果，或加入自动重查队列；结果按邮件身份回流并保留历史。':'<b>工作方式：</b>询单队列与未完成邮件已统一；日期范围按邮件日期同步作用于询单、漏单和已过滤三个视图。');
     const source=queueMails();if(!app.mailId||!source.some(m=>m.id===app.mailId)){app.mailId=source[0]?.id||null;app.detailId=isFiltered?null:source[0]?.details[0]?.id||null;app.tab=isFiltered?'raw':'details'};
     renderQueue();renderDetail();renderEvidence();
   };
@@ -323,10 +367,32 @@
   $('#select-visible').onclick=()=>{queueMails().forEach(m=>app.selectedMailIds.add(m.id));renderQueue()};
   $('#clear-selected').onclick=()=>{app.selectedMailIds.clear();renderQueue()};
   $('#search').oninput=e=>{app.search=e.target.value;render()};
-  $('#operation-date').onchange=e=>{app.operationDate=e.target.value||'';app.selectedMailIds.clear();render()};
-  $('#clear-operation-date').onclick=()=>{app.operationDate='';$('#operation-date').value='';app.selectedMailIds.clear();render()};
+  function applyDateRange(){
+    if(app.dateStart&&app.dateEnd&&app.dateStart>app.dateEnd){const swap=app.dateStart;app.dateStart=app.dateEnd;app.dateEnd=swap;syncDateInputs();toast('开始日期晚于截至日期，系统已自动交换')}
+    try{localStorage.setItem('ecopv-workbench-ui-v1',JSON.stringify({dateStart:app.dateStart,dateEnd:app.dateEnd}))}catch(_){}
+    app.selectedMailIds.clear();app.mailId=null;app.detailId=null;render();
+  }
+  $('#date-start').onchange=e=>{app.dateStart=e.target.value||'';applyDateRange()};
+  $('#date-end').onchange=e=>{app.dateEnd=e.target.value||'';applyDateRange()};
+  $('#clear-date-range').onclick=()=>{app.dateStart='';app.dateEnd='';try{localStorage.setItem('ecopv-workbench-ui-v1',JSON.stringify({dateStart:'',dateEnd:''}))}catch(_){}syncDateInputs();app.selectedMailIds.clear();app.mailId=null;app.detailId=null;render()};
   document.querySelectorAll('[data-filter]').forEach(n=>n.onclick=()=>{app.filter=n.dataset.filter;document.querySelectorAll('[data-filter]').forEach(x=>x.classList.toggle('on',x===n));render()});
   document.querySelectorAll('[data-view]').forEach(n=>n.onclick=()=>{app.view=n.dataset.view;app.filter='all';app.search='';app.mailId=null;app.detailId=null;app.highlightField=null;app.tab='details';app.selectedMailIds.clear();$('#search').value='';document.querySelectorAll('[data-view]').forEach(x=>x.classList.toggle('active',x===n));document.querySelectorAll('[data-filter]').forEach(x=>x.classList.toggle('on',x.dataset.filter==='all'));render()});
+
+  function bindSplitters(){
+    const work=document.querySelector('.work');if(!work)return;
+    const saved=JSON.parse(localStorage.getItem('ecopv-workbench-splitters-v1')||'{}');
+    if(Number.isFinite(saved.queue))work.style.setProperty('--queue-w',`${saved.queue}px`);
+    if(Number.isFinite(saved.evidence))work.style.setProperty('--evidence-w',`${saved.evidence}px`);
+    document.querySelectorAll('.splitter').forEach(splitter=>{
+      let dragging=false,startX=0,startQueue=0,startEvidence=0;
+      const begin=e=>{if(window.innerWidth<=780)return;dragging=true;startX=e.clientX;startQueue=parseFloat(getComputedStyle(work).getPropertyValue('--queue-w'))||285;startEvidence=parseFloat(getComputedStyle(work).getPropertyValue('--evidence-w'))||335;splitter.classList.add('dragging');document.body.style.cursor='col-resize';document.body.style.userSelect='none';splitter.setPointerCapture?.(e.pointerId)};
+      const move=e=>{if(!dragging)return;const delta=e.clientX-startX;const type=splitter.dataset.splitter;const next=type==='queue'?Math.max(220,Math.min(520,startQueue+delta)):Math.max(320,Math.min(700,startEvidence-delta));work.style.setProperty(type==='queue'?'--queue-w':'--evidence-w',`${Math.round(next)}px`)};
+      const end=()=>{if(!dragging)return;dragging=false;splitter.classList.remove('dragging');document.body.style.cursor='';document.body.style.userSelect='';try{localStorage.setItem('ecopv-workbench-splitters-v1',JSON.stringify({queue:parseFloat(getComputedStyle(work).getPropertyValue('--queue-w')),evidence:parseFloat(getComputedStyle(work).getPropertyValue('--evidence-w'))}))}catch(_){} };
+      splitter.onpointerdown=begin;splitter.onpointermove=move;splitter.onpointerup=end;splitter.onpointercancel=end;
+      splitter.onkeydown=e=>{if(e.key!=='ArrowLeft'&&e.key!=='ArrowRight')return;e.preventDefault();const delta=e.key==='ArrowRight'?20:-20;const type=splitter.dataset.splitter;const current=type==='queue'?parseFloat(getComputedStyle(work).getPropertyValue('--queue-w')):parseFloat(getComputedStyle(work).getPropertyValue('--evidence-w'));const next=type==='queue'?Math.max(220,Math.min(520,current+delta)):Math.max(320,Math.min(700,current-delta));work.style.setProperty(type==='queue'?'--queue-w':'--evidence-w',`${Math.round(next)}px`)};
+    });
+  }
+  bindSplitters();syncDateInputs();
 
   // 业务明细卡片可拖动排序；拖动只改变当前工作台的展示顺序，不会篡改
   // 阶段一原始 Excel。点击字段行则把选中字段同步到左侧证据区。
@@ -466,10 +532,19 @@
     const body=document.querySelector('#detail .detail-body');
     const top=body?body.scrollTop:0;
     const left=body?body.scrollLeft:0;
+    const evidence=document.querySelector('#evidence');
+    const evidenceTop=evidence?evidence.scrollTop:0;
     render();
     requestAnimationFrame(()=>{
       const next=document.querySelector('#detail .detail-body');
       if(next){next.scrollTop=top;next.scrollLeft=left}
+      const nextEvidence=document.querySelector('#evidence');
+      if(nextEvidence&&app.highlightField){
+        // 先让命中内容居中，再保留用户在附件表格内部的横向位置；
+        // 不把证据面板重置到第一行。
+        focusEvidenceHit();
+        if(evidenceTop>0&&!nextEvidence.querySelector('.evidence-hit'))nextEvidence.scrollTop=evidenceTop;
+      }else if(nextEvidence)nextEvidence.scrollTop=evidenceTop;
     });
   }
   const _renderDetailWithFields=renderDetail;
