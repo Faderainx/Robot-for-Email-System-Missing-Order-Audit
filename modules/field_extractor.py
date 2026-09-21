@@ -1550,6 +1550,45 @@ class FieldExtractor:
         """判断文本是否是代理名(而非公司名)"""
         return text.strip() in self._agent_alias_index
 
+    def _strip_known_agent_prefix(self, value: str) -> str:
+        """剥离粘在公司名前的已知代理别名。
+
+        批量邮件有时写成 ``TBA广州钛显互联网科技有限公司``，而不是
+        ``TBA+广州钛显互联网科技有限公司``。代理表已经提供了可靠的别名
+        集合，因此只在候选以已知别名开头、且剩余部分本身通过公司主体规则
+        时剥离；不会对未知前缀做猜测，也不会吞掉真实公司名。
+        """
+        raw = str(value or "").strip()
+        if not raw or not self._agent_alias_index:
+            return raw
+        aliases = sorted(self._agent_alias_index, key=len, reverse=True)
+        for alias in aliases:
+            if len(raw) <= len(alias) or raw[:len(alias)].casefold() != alias.casefold():
+                continue
+            remainder = raw[len(alias):].lstrip(" \t-—_:：+＋/／")
+            if remainder and self._company_fragment_is_valid(remainder):
+                return remainder.strip(" .,-")
+        return raw
+
+    @classmethod
+    def _company_fragment_is_valid(cls, value: str) -> bool:
+        """判断代理别名后的剩余片段是否具备公司主体证据。"""
+        text = str(value or "").strip()
+        if len(text) < 4:
+            return False
+        if re.search(
+            r"(?:有限责任公司|股份有限公司|集团有限公司|有限公司|责任公司|公司|"
+            r"经营部|门市部|服务部|商店|商行|工厂|工作室|店)$",
+            text,
+        ):
+            return True
+        if re.match(
+            r"(?i)^(?:SIA|AG|SA|SARL)\s+[A-Za-zÀ-ÖØ-öø-ÿĄĆĘŁŃÓŚŹŻąćęłńóśźż]",
+            text,
+        ):
+            return True
+        return bool(re.search(rf"{cls._COMPANY_EN_SUFFIX}\s*$", text, re.I))
+
     _CLIENT_CODE_RE = re.compile(
         # 同时覆盖 EG3164、BG1945 和 K-DED0943 这类带前缀的案件编号。
         r"(?<![A-Za-z0-9])((?:[A-Za-z]{1,3}\s*[-_]\s*)?"
@@ -1658,6 +1697,7 @@ class FieldExtractor:
         text = re.sub(r"^\s*[A-Za-z]{1,8}[-_]?\d{2,}\s+", "", text)
 
         def _ok(name: str) -> bool:
+            name = self._strip_known_agent_prefix(name)
             return (
                 len(name) >= 4
                 and not self._is_agent_name(name)
@@ -1673,6 +1713,7 @@ class FieldExtractor:
             r"(?:（个体工商户）|\(个体工商户\))?",
             text,
         )
+        zh = [self._strip_known_agent_prefix(c) for c in zh]
         zh = [c for c in zh if _ok(c)]
         if zh:
             return max(zh, key=len)
@@ -1684,6 +1725,22 @@ class FieldExtractor:
         )
         if m:
             candidate, _, _ = self._strip_company_prefix_noise(m.group(1))
+            candidate = self._strip_known_agent_prefix(candidate)
+            if _ok(candidate):
+                return candidate
+
+        # 部分欧洲公司名只有法定前缀，没有 LTD/GMBH 等后缀，例如
+        # `SIA Andistef`。这类候选只能在明确的法律前缀后读取，不能把
+        # 普通英文姓名或说明句泛化成公司名。
+        prefix = re.search(
+            rf"\b(?:SIA|AG|SA|SARL)\s+[{self._COMPANY_EN_LETTER_CHARS}]"
+            rf"[{self._COMPANY_EN_CHARS}]{{2,80}}",
+            text,
+            re.I,
+        )
+        if prefix:
+            candidate = prefix.group(0).strip(" .,-")
+            candidate = self._strip_known_agent_prefix(candidate)
             if _ok(candidate):
                 return candidate
         return ""
@@ -1709,7 +1766,9 @@ class FieldExtractor:
         for match in re.finditer(zh_pattern, text):
             value = match.group(0).strip(" ,，;；+＋&＆")
             if value:
-                matches.append((match.start(), match.end(), value))
+                cleaned = self._strip_known_agent_prefix(value)
+                offset = match.start() + (len(value) - len(cleaned)) if cleaned != value else match.start()
+                matches.append((offset, match.end(), cleaned))
 
         en_pattern = (
             rf"[{self._COMPANY_EN_LETTER_CHARS}][{self._COMPANY_EN_CHARS}]{{2,80}}?"
@@ -1718,8 +1777,18 @@ class FieldExtractor:
         for match in re.finditer(en_pattern, text, re.I):
             raw_value = match.group(1).strip(" .,-") if match.lastindex else match.group(0).strip(" .,-")
             value, offset, _ = self._strip_company_prefix_noise(raw_value)
+            value = self._strip_known_agent_prefix(value)
             if value:
                 matches.append((match.start() + offset, match.end(), value))
+
+        prefix_pattern = (
+            rf"\b(?:SIA|AG|SA|SARL)\s+[{self._COMPANY_EN_LETTER_CHARS}]"
+            rf"[{self._COMPANY_EN_CHARS}]{{2,80}}"
+        )
+        for match in re.finditer(prefix_pattern, text, re.I):
+            value = self._strip_known_agent_prefix(match.group(0).strip(" .,-"))
+            if value:
+                matches.append((match.start(), match.end(), value))
 
         # 先按原文位置，再按长度降序；同一位置的短子串被长候选覆盖。
         matches.sort(key=lambda item: (item[0], -(item[1] - item[0])))

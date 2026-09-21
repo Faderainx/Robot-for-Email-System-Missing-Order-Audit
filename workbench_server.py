@@ -195,10 +195,61 @@ def _looks_like_company_name(value: Any) -> bool:
         return len(text) >= 4
     return bool(re.search(
         r"(?i)(?:^|\s)(?:limited|ltd\.?|llc|gmbh|s\.?\s*p\.?\s*z\.?\s*o\.?\s*o\.?|"
-        r"sarl|sas|b\.?v\.?|a\.?b\.?|s\.?l\.?|oy|a\.?/\.?s\.?|plc|inc\.?|corp\.?|company)"
+        r"sarl|sas|sia|b\.?v\.?|a\.?b\.?|s\.?l\.?|oy|a\.?/\.?s\.?|plc|inc\.?|corp\.?|company)"
         r"(?:$|\s|[,.)])",
         text,
     ))
+
+
+def _attachment_sheet_company_candidates(attachment: Dict[str, Any]) -> List[Tuple[str, str, str]]:
+    """读取附件表格嵌套 cells 中的公司中文名/英文名。
+
+    阶段一保存的 xlsx 证据不是传统 ``records.raw_text``，而是
+    ``sheets[].rows[].cells``。一个表格行可能同时有中文名和英文名，
+    也可能中文单元格为空；这里返回候选、证据类型和行定位，交给上层按
+    当前业务明细的正文/来源做最终选择，不从城市或注册号推断公司名。
+    """
+    candidates: List[Tuple[str, str, str]] = []
+    filename = _text(attachment.get("filename"))
+    for sheet in attachment.get("sheets") or []:
+        if not isinstance(sheet, dict):
+            continue
+        sheet_name = _text(sheet.get("sheet_name") or "工作表")
+        rows = sheet.get("rows") or sheet.get("preview_rows") or []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            cells = row.get("cells") or row.get("values") or []
+            if not isinstance(cells, list):
+                continue
+            row_number = _text(row.get("row_number") or "?")
+            locator = f"附件表格：{filename} / {sheet_name} 第{row_number}行"
+            for index, raw_label in enumerate(cells):
+                label = _text(raw_label)
+                compact = re.sub(r"\s+", "", label).lower()
+                if not (
+                    re.search(r"公司中文名称|中文公司名称", compact)
+                    or re.search(r"companyname.*(?:chinese|in chinese)", compact)
+                    or re.search(r"公司英文名称|英文公司名称", compact)
+                    or re.search(r"companyname.*(?:english|in english)", compact)
+                ):
+                    continue
+                english = bool(re.search(r"英文|english", compact))
+                for raw_value in cells[index + 1:]:
+                    value = _text(raw_value)
+                    next_compact = re.sub(r"\s+", "", value).lower()
+                    if not value:
+                        continue
+                    if (
+                        re.search(r"公司中文名称|中文公司名称|公司英文名称|英文公司名称", next_compact)
+                        or re.search(r"companyname", next_compact)
+                    ):
+                        break
+                    if _looks_like_company_name(value):
+                        kind = "附件表格英文公司名" if english else "附件表格中文公司名"
+                        candidates.append((value, kind, locator))
+                    break
+    return candidates
 
 
 def _subject_loose_company(subject: Any) -> str:
@@ -264,6 +315,25 @@ def _repair_attachment_fields(row: Dict[str, Any]) -> Dict[str, Any]:
         row["客户"] = cleaned_company
         row["客户提取来源"] = "公司编号与法定名称拆分"
         current_company = cleaned_company
+
+    # 代理名有时直接粘在客户公司前面（例如 TBA广州钛显互联网科技有限公司）。
+    # 只使用当前明细已确认的代理值，并要求剩余文本仍是合法公司候选，避免
+    # 把真实以同样字母开头的公司名误删。
+    agent_aliases = []
+    for raw_agent in re.split(r"[、,，;；/／|]", _text(row.get("代理") or row.get("代理(可能空)"))):
+        alias = raw_agent.strip()
+        if len(alias) >= 2:
+            agent_aliases.append(alias)
+    for alias in sorted(set(agent_aliases), key=len, reverse=True):
+        if len(current_company) <= len(alias) or current_company[:len(alias)].casefold() != alias.casefold():
+            continue
+        remainder = current_company[len(alias):].lstrip(" \t-—_:：+＋/／")
+        if remainder and _looks_like_company_name(remainder):
+            row["客户公司名称"] = remainder.strip(" .,-")
+            row["客户"] = row["客户公司名称"]
+            row["客户提取来源"] = "代理前缀清洗"
+            current_company = row["客户公司名称"]
+            break
     # 旧记录中“不能与其它公司”“国公司”等确定性说明值可能遮住了主题中
     # 明确的英文商号。能按案件编号和国家/项目边界恢复时直接修复；否则保留
     # 空值/人工复核，不再把说明文字显示成公司。
@@ -282,8 +352,13 @@ def _repair_attachment_fields(row: Dict[str, Any]) -> Dict[str, Any]:
     source = _text(row.get("附件明细来源"))
     code = _text(row.get("客户编号"))
     company_candidates: List[str] = []
+    sheet_company_candidates: List[Tuple[str, str, str]] = []
     agent_candidate = ""
     for attachment in evidence:
+        for candidate, kind, locator in _attachment_sheet_company_candidates(attachment):
+            if source and locator not in source:
+                continue
+            sheet_company_candidates.append((candidate, kind, locator))
         for record in attachment.get("records") or []:
             if not isinstance(record, dict):
                 continue
@@ -312,14 +387,41 @@ def _repair_attachment_fields(row: Dict[str, Any]) -> Dict[str, Any]:
                 if _looks_like_company_name(part):
                     company_candidates.append(part)
     company_candidates = list(dict.fromkeys(company_candidates))
-    replacement = next(
-        (candidate for candidate in company_candidates if candidate != current_company),
-        "",
+    candidate_pairs: List[Tuple[str, str]] = [
+        (candidate, "附件表格中文公司名") for candidate in company_candidates
+    ] + [
+        (candidate, kind) for candidate, kind, _ in sheet_company_candidates
+    ]
+    unique_pairs: List[Tuple[str, str]] = []
+    seen_candidates = set()
+    for candidate, kind in candidate_pairs:
+        compact = re.sub(r"\s+", "", candidate).casefold()
+        if compact and compact not in seen_candidates:
+            seen_candidates.add(compact)
+            unique_pairs.append((candidate, kind))
+
+    # 附件里可能是一个压缩包的多家公司。优先选择在本封邮件主题/正文中
+    # 实际出现的候选；若来源已经精确到一行且只剩一个候选，则可直接采用。
+    evidence_text = " ".join(
+        _text(row.get(key))
+        for key in ("邮件主题", "主题", "subject", "邮件正文", "邮件正文原文", "邮件正文摘要(最多300字)", "正文", "body_text")
     )
-    if replacement and not _looks_like_company_name(current_company):
-        row["客户公司名称"] = replacement
-        row["客户"] = replacement
-        row["客户提取来源"] = "附件表格中文公司名"
+    compact_evidence = re.sub(r"\s+", "", evidence_text).casefold()
+    matched_pairs = [
+        pair for pair in unique_pairs
+        if re.sub(r"\s+", "", pair[0]).casefold() in compact_evidence
+    ]
+    usable_pairs = matched_pairs or (unique_pairs if len(unique_pairs) == 1 else [])
+    # 同一行同时有中文和英文名时，中文名优先；中文为空时才会落到英文名。
+    usable_pairs.sort(key=lambda pair: (0 if pair[1] == "附件表格中文公司名" else 1, -len(pair[0])))
+    replacement = next(
+        (candidate, kind) for candidate, kind in usable_pairs
+        if candidate != current_company
+    ) if usable_pairs else ("", "")
+    if replacement[0] and not _looks_like_company_name(current_company):
+        row["客户公司名称"] = replacement[0]
+        row["客户"] = replacement[0]
+        row["客户提取来源"] = replacement[1]
     if agent_candidate and not _text(row.get("代理")):
         row["代理"] = agent_candidate
         row["代理(可能空)"] = agent_candidate
