@@ -1494,20 +1494,9 @@ class WorkbenchStore:
                     mail["status"] = "ready"
                 route = routes.get(mail["id"]) if isinstance(routes.get(mail["id"]), dict) else {}
                 mail["route_events"] = route.get("events") if isinstance(route.get("events"), list) else []
-                operation_dates = [
-                    _text(mail.get("operation_date"))[:10],
-                    *[_text(event.get("at"))[:10] for event in mail["route_events"] if isinstance(event, dict)],
-                    *[
-                        _text(event.get("at"))[:10]
-                        for detail in mail["details"]
-                        for event in (detail.get("events") or [])
-                        if isinstance(event, dict)
-                    ],
-                ]
-                mail["operation_date"] = max(
-                    (value for value in operation_dates if value),
-                    default=_text(mail.get("date"))[:10],
-                )
+                # 处理日期筛选必须绑定邮件实际发生日期，不能随着人工操作记录更新而漂移。
+                # 人工操作时间仍保存在 route_events/details.events 中，供审计使用。
+                mail["operation_date"] = _text(mail.get("date"))[:10]
                 # 邮件级统计与“附件表格行数”分开，避免把主题里的数字、项目数
                 # 或旧表单行误当成公司数量。工作台据此明确显示主体/项目/明细口径。
                 mail["company_count"] = len({
@@ -2035,7 +2024,7 @@ class WorkbenchStore:
         rid = _text(payload.get("record_id"))
         action = _text(payload.get("action"))
         allowed = {
-            "edit", "confirm", "return", "needs_info", "agent_confirm", "reset",
+            "edit", "confirm", "confirm_detail", "return", "needs_info", "agent_confirm", "reset",
             "add_project", "delete_project", "bulk_confirm", "move_to_filtered",
             "move_to_review", "bulk_filter", "bulk_restore",
             "manual_workorder_result", "queue_workorder_retry",
@@ -2078,9 +2067,9 @@ class WorkbenchStore:
                 entry.setdefault("fields", {}).update({k: _text(v) for k, v in fields.items() if k in allowed})
                 entry["status"] = "review"
                 label = "人工修正字段"
-            elif action == "confirm":
+            elif action in {"confirm", "confirm_detail"}:
                 entry["status"] = "confirmed"
-                label = "人工确认整理完成"
+                label = "人工确认当前业务" if action == "confirm_detail" else "人工确认整理完成"
             elif action == "return":
                 entry["status"] = "returned"
                 label = "退回复核"
