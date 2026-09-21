@@ -792,6 +792,11 @@ class WorkbenchStore:
                     row.get("客户公司名称") or row.get("客户") or row.get("company")
                 )
             ]
+            # 数据库保留完整导入历史，但当前工作台展示仍必须隐藏同一封邮件
+            # 中已被有效主记录覆盖的旧版“人工补全”行。接口增量导入时通常没有
+            # 当前 Excel 文件，后面的 ``if records`` 分支不会执行；因此这里
+            # 先对数据库读取结果统一做展示层过滤，避免旧的 7 条项目重新出现。
+            stored_display = _hide_superseded_review_rows(stored)
             if records:
                 fresh = [
                     row for row in display_records
@@ -803,7 +808,7 @@ class WorkbenchStore:
                 stored_by_mail: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
                 for row in fresh:
                     fresh_by_mail.setdefault(_mail_identity_tuple(row), []).append(row)
-                for row in stored:
+                for row in stored_display:
                     stored_by_mail.setdefault(_mail_identity_tuple(row), []).append(row)
 
                 # 同一封邮件优先使用本次输出；如果本次输出全是旧版无法
@@ -812,7 +817,7 @@ class WorkbenchStore:
                 selected: List[Dict[str, Any]] = []
                 fresh_mail_keys = set(fresh_by_mail)
                 stable_by_legacy: Dict[str, str] = {}
-                for row in stored:
+                for row in stored_display:
                     legacy = _text(row.get("_legacy_id"))
                     stable = _text(row.get("_db_record_key"))
                     if legacy and stable:
@@ -849,20 +854,20 @@ class WorkbenchStore:
                 # 本次文件未覆盖的历史邮件仍保留在工作台，可按邮件日期
                 # 继续处理；同一邮件只保留一个版本，不把当前邮件的旧版本
                 # 再追加一次。
-                if stored:
+                if stored_display:
                     selected_keys = {
                         _text(row.get("_db_record_key")) or _text(row.get("_id"))
                         for row in selected
                     }
-                    for row in stored:
+                    for row in stored_display:
                         if _mail_identity_tuple(row) in fresh_mail_keys:
                             continue
                         key = _text(row.get("_db_record_key")) or _text(row.get("_id"))
                         if key and key not in selected_keys:
                             selected.append(row)
                 return selected
-            if stored:
-                return stored
+            if stored_display:
+                return stored_display
         # 测试/临时会话没有数据库覆盖层，也必须使用与正式工作台相同的
         # 历史脏值过滤规则，避免测试页面重新显示发件方说明句客户。
         return [
