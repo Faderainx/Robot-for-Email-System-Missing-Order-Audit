@@ -1634,6 +1634,58 @@ def test_attachment_xlsx_record_authority():
           evidence)
 
 
+def test_daily_register_rows_survive_llm_project_completion():
+    """每日登记表的多主体行不能因 LLM 补项目而被压成一条。"""
+    print("== 每日登记表多主体与 LLM 项目补全 ==")
+    from modules.field_extractor import FieldExtractor
+
+    class StubLLM:
+        enabled = True
+
+        @staticmethod
+        def extract_fields_llm(*args, **kwargs):
+            return {
+                "客户": "南宁前莱文化传媒有限公司",
+                "项目": ["德国电池法"],
+                "需求": "撤单",
+                "confidence": "high",
+            }
+
+    attachment = {
+        "filename": "8.24 德国项目每日登记表――Peng.xlsx",
+        "structured_records": [
+            {
+                "sheet_name": "Sheet1", "row_number": 2,
+                "customer": "南宁前莱文化传媒有限公司", "customer_code": "XS0016",
+                "business": "设备电池", "record_type": "entity",
+            },
+            {
+                "sheet_name": "Sheet1", "row_number": 3,
+                "customer": "南宁市乾元广进商贸有限公司", "customer_code": "XS0017",
+                "business": "设备电池", "record_type": "entity",
+            },
+        ],
+        "sheets": [],
+    }
+    extractor = FieldExtractor(
+        {}, [{"项目名称": "德国电池法", "国家": "德国", "业务类型": "电池法"}],
+        llm_client=StubLLM(), ocr_fallback=False,
+    )
+    rows = extractor.extract_fields({
+        "subject": "8.24 每日登记表――Peng",
+        "body_text": "请查收每日登记表",
+        "sender_email": "agent@example.com",
+        "attachments": [attachment],
+    })
+    check("LLM补项目后仍保留两条公司明细",
+          len(rows) == 2
+          and {row.get("客户") for row in rows} == {
+              "南宁前莱文化传媒有限公司", "南宁市乾元广进商贸有限公司"
+          }
+          and all(row.get("项目") == "德国电池法" for row in rows),
+          rows)
+
+
 def test_multi_project_company_count_and_generic_phrase():
     """一家公司申请多个项目时不把“1家公司/回收公司”当成第二家公司。"""
     print("== 多项目公司数量与通用词校验 ==")
@@ -1840,6 +1892,24 @@ def test_epr_form_labels_are_not_customer_records():
           and registration_records[0]["customer_code"] == "PCY009"
           and registration_records[0]["agent"] == "朴诚源",
           registration_records)
+
+    # 德国项目每日登记表没有“项目/服务”列，而是用“种类”列记录
+    # 设备电池、工业电池等业务类型。此前因未识别“种类”，同一附件的
+    # XS0016/XS0017 两家公司只有预览、没有结构化记录，最终邮件只生成一条。
+    daily_register_rows = [
+        ["日期", "客户简称", "编号", "公司中文名", "公司英文名", "种类", "品牌名"],
+        ["2026-08-24", "向善", "XS0016", "南宁前莱文化传媒有限公司", "Nanning Qianlai Cultural Media Co., Ltd.", "设备电池", "Nanning Qianlai Cultural Media Co., Ltd."],
+        ["2026-08-24", "向善", "XS0017", "南宁市乾元广进商贸有限公司", "Nanning Qianyuan Guangjin Trading Company Limited", "设备电池", "Nanning Qianlai Cultural Media Co., Ltd."],
+    ]
+    daily_records = _xlsx_structured_records(daily_register_rows, "Sheet1")
+    check("每日登记表按两行拆分公司主体",
+          len(daily_records) == 2
+          and [item["customer"] for item in daily_records] == [
+              "南宁前莱文化传媒有限公司", "南宁市乾元广进商贸有限公司"
+          ]
+          and [item["customer_code"] for item in daily_records] == ["XS0016", "XS0017"]
+          and all(item["business"] == "设备电池" for item in daily_records),
+          daily_records)
 
     extractor = FieldExtractor({}, [], ocr_fallback=False)
     rejected = [
