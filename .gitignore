@@ -4,6 +4,18 @@ config.yaml
 # 输出文件
 output/
 logs/
+output_test/
+
+# 本地邮件、附件、查询结果均可能含客户资料，绝不进入版本控制
+cache/
+storage/
+data/
+findings.md
+progress.md
+task_plan.md
+_off*.py
+_off*.txt
+err_off*.log
 
 # GUI 运行时产物 (本机状态/调试截图, 每次运行自动生成)
 session_state.json

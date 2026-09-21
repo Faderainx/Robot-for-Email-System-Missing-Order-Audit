@@ -59,7 +59,8 @@ DUMP_JS = r"""
       ...pick(el),
       type: el.getAttribute('type') || '',
       readonly: el.hasAttribute('readonly'),
-      value: (el.value || '').slice(0, 40),
+      // 只保留字段结构，不导出账号、搜索条件或客户名称等输入值。
+      has_value: Boolean(el.value),
     }));
 
   // 下拉组件 (ElementUI / AntD / 原生 select)
@@ -95,7 +96,8 @@ DUMP_JS = r"""
     url: location.href,
     title: document.title,
     inputs, selects, buttons, navs, labels, tables,
-    body_head: (document.body && document.body.innerText || '').slice(0, 1200),
+    // 页面正文和输入值可能含客户资料；选择器探测不需要它们。
+    body_text_length: (document.body && document.body.innerText || '').length,
   };
 }
 """

@@ -7,12 +7,14 @@ import os
 import email
 import imaplib
 import tempfile
+import time
 from email.header import decode_header
-from email.utils import parsedate_to_datetime
+from email.utils import getaddresses, parsedate_to_datetime
 from datetime import datetime, timedelta
 from typing import List, Dict
 
 from bs4 import BeautifulSoup
+from utils.runtime_paths import APP_ROOT
 
 
 def _decode_str(s):
@@ -77,9 +79,16 @@ class MailReader:
         self.address = config["address"]
         self.password = config["password"]
         self.mailbox = config.get("mailbox", "INBOX")
-        # 原始邮件本地缓存（按 mailbox+uid 落盘，重跑同范围直接命中，断连不丢已拉数据）
+        self.connect_timeout = max(5, int(config.get("connect_timeout", config.get("timeout", 30))))
+        self.connect_retries = max(1, int(config.get("connect_retries", 3)))
+        self.connect_retry_delay = max(0.5, float(config.get("connect_retry_delay", 2)))
+        # 正式阶段一配置关闭缓存；保留 True 默认值兼容需要离线断点续拉的旧调用方。
+        self.cache_enabled = bool(config.get("cache_enabled", True))
+        # 原始邮件本地缓存（按 mailbox+UIDVALIDITY+UID 落盘，重跑同范围直接命中，
+        # 断连不丢已拉数据）。UIDVALIDITY 变化意味着服务器 UID 命名空间已重置，
+        # 旧缓存绝不能复用。
         self.cache_dir = config.get("cache_dir") or os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cache", "mails"
+            str(APP_ROOT), "cache", "mails"
         )
         # 每拉取 N 封（真实网络拉取，不含缓存命中）重连一次
         self.reconnect_batch_size = config.get("reconnect_batch_size", 20)
@@ -90,11 +99,55 @@ class MailReader:
             getattr(self.logger, level)(msg)
 
     def _connect(self, ctx):
-        """创建新的 IMAP 连接"""
-        conn = imaplib.IMAP4_SSL(self.server_addr, self.port, ssl_context=ctx, timeout=30)
-        conn.login(self.address, self.password)
-        conn.select(self.mailbox, readonly=True)
-        return conn
+        """创建新的 IMAP 连接；网络瞬断时有限重试，避免一次超时直接终止阶段一。"""
+        last_error = None
+        for attempt in range(1, self.connect_retries + 1):
+            conn = None
+            try:
+                self._log(
+                    f"连接 IMAP {self.server_addr}:{self.port}（第 {attempt}/{self.connect_retries} 次）"
+                )
+                conn = imaplib.IMAP4_SSL(
+                    self.server_addr,
+                    self.port,
+                    ssl_context=ctx,
+                    timeout=self.connect_timeout,
+                )
+                conn.login(self.address, self.password)
+                conn.select(self.mailbox, readonly=True)
+                return conn
+            except (OSError, TimeoutError, imaplib.IMAP4.error) as exc:
+                last_error = exc
+                if conn is not None:
+                    try:
+                        conn.logout()
+                    except Exception:
+                        pass
+                if attempt >= self.connect_retries:
+                    break
+                delay = self.connect_retry_delay * attempt
+                self._log(f"IMAP 连接失败: {exc}；{delay:g} 秒后重试", "warning")
+                time.sleep(delay)
+        raise TimeoutError(
+            f"无法连接 IMAP 服务器 {self.server_addr}:{self.port}（已重试 {self.connect_retries} 次）：{last_error}。"
+            "请检查网络/VPN代理、企业邮箱 IMAP 开关及端口 993。"
+        ) from last_error
+
+    @staticmethod
+    def _uidvalidity(conn) -> str:
+        """读取当前邮箱 UIDVALIDITY；取不到时使用独立的 unknown 命名空间。"""
+        try:
+            _, values = conn.response("UIDVALIDITY")
+            if values:
+                value = values[-1]
+                if isinstance(value, bytes):
+                    value = value.decode("ascii", errors="ignore")
+                value = str(value).strip()
+                if value:
+                    return value
+        except Exception:
+            pass
+        return "unknown"
 
     def fetch_mails(
         self,
@@ -121,10 +174,14 @@ class MailReader:
         try:
             conn = self._connect(ctx)
             self._log("邮箱连接成功")
+            uidvalidity = self._uidvalidity(conn)
 
             search_from = date_from.strftime("%d-%b-%Y")
             search_to = (date_to + timedelta(days=1)).strftime("%d-%b-%Y")
-            status, data = conn.search(None, f'SINCE {search_from}', f'BEFORE {search_to}')
+            # 必须使用 UID 命令：序号会随着邮箱新增/删除而变化，不能作为缓存键。
+            status, data = conn.uid(
+                "SEARCH", None, f"SINCE {search_from}", f"BEFORE {search_to}"
+            )
 
             if status != "OK":
                 self._log("搜索邮件失败", "error")
@@ -134,7 +191,10 @@ class MailReader:
             total = len(uids)
             self._log(f"找到 {total} 封邮件 ({date_from.date()} ~ {date_to.date()})")
 
-            os.makedirs(self.cache_dir, exist_ok=True)
+            if self.cache_enabled:
+                os.makedirs(self.cache_dir, exist_ok=True)
+            else:
+                self._log("阶段一原始邮件缓存已禁用，本次全部从 IMAP 重新拉取")
             cache_hits = 0
             fetched = 0  # 真实网络拉取计数（重连阈值只看这个，缓存命中不触发重连）
             BATCH_SIZE = self.reconnect_batch_size
@@ -143,8 +203,14 @@ class MailReader:
                 uid = uid_bytes.decode()
 
                 # 缓存命中 → 直接读本地，跳过网络
-                cache_path = os.path.join(self.cache_dir, f"{self.mailbox}_{uid}.eml")
-                if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+                cache_path = os.path.join(
+                    self.cache_dir, f"{self.mailbox}_uidv{uidvalidity}_{uid}.eml"
+                )
+                if (
+                    self.cache_enabled
+                    and os.path.exists(cache_path)
+                    and os.path.getsize(cache_path) > 0
+                ):
                     try:
                         with open(cache_path, "rb") as f:
                             raw_mails.append((uid, f.read()))
@@ -169,13 +235,14 @@ class MailReader:
                     conn = self._connect(ctx)
 
                 try:
-                    status, msg_data = conn.fetch(uid_bytes, "(RFC822)")
+                    status, msg_data = conn.uid("FETCH", uid_bytes, "(RFC822)")
                 except Exception as e:
                     self._log(f"拉取第{idx+1}封失败(uid={uid}): {e}", "warning")
                     # 尝试重连后重试一次
                     try:
                         conn = self._connect(ctx)
-                        status, msg_data = conn.fetch(uid_bytes, "(RFC822)")
+                        uidvalidity = self._uidvalidity(conn)
+                        status, msg_data = conn.uid("FETCH", uid_bytes, "(RFC822)")
                     except Exception as e2:
                         self._log(f"重试失败: {e2}", "warning")
                         continue
@@ -187,11 +254,12 @@ class MailReader:
                 fetched += 1
 
                 # 落盘缓存（失败不影响主流程）
-                try:
-                    with open(cache_path, "wb") as f:
-                        f.write(raw_bytes)
-                except OSError as e:
-                    self._log(f"写缓存失败(uid={uid}): {e}", "warning")
+                if self.cache_enabled:
+                    try:
+                        with open(cache_path, "wb") as f:
+                            f.write(raw_bytes)
+                    except OSError as e:
+                        self._log(f"写缓存失败(uid={uid}): {e}", "warning")
 
                 if progress_callback:
                     progress_callback(idx + 1, total)
@@ -223,8 +291,27 @@ class MailReader:
 
             sender = _decode_str(msg.get("From", ""))
             sender_email = self._extract_email_addr(sender)
+            # 保留原始收件人头。阶段一过去只导出了发件人，导致人工工作台
+            # 无法展示或追溯邮件实际投递对象；这里不改过滤或提取判断，仅补齐证据字段。
+            recipient = _decode_str(msg.get("To", ""))
+            recipient_emails = [
+                address.strip().lower()
+                for _, address in getaddresses([recipient])
+                if address and "@" in address
+            ]
             subject = _decode_str(msg.get("Subject", ""))
-            date = parsedate_to_datetime(msg.get("Date", ""))
+            date_header = msg.get("Date", "")
+            try:
+                date = parsedate_to_datetime(date_header) if date_header else None
+            except (TypeError, ValueError, OverflowError) as exc:
+                # 个别自动通知/损坏邮件可能没有合法 Date 头；IMAP 搜索已经
+                # 按服务器内部日期完成范围筛选，这里保留邮件并把日期置空，
+                # 让后续人工复核处理，而不是让整批阶段一崩溃。
+                date = None
+                self._log(
+                    f"邮件日期头无效(uid={uid})，已保留邮件并标记日期待复核: {exc}",
+                    "warning",
+                )
 
             # 跳过自身发送的邮件
             if self_email.lower() in sender_email.lower():
@@ -232,24 +319,32 @@ class MailReader:
                     "uid": uid,
                     "sender_email": sender_email,
                     "sender_name": sender,
+                    "recipient": recipient,
+                    "recipient_emails": recipient_emails,
                     "date": date,
                     "subject": subject,
                     "body_text": "",
+                    "body_original": "",
                     "body_raw": "",
                     "attachments": [],
                     "skip_reason": "self_sent",
                 })
                 continue
 
-            body_text, body_raw, attachments = self._parse_msg_content(msg)
+            body_text, body_raw, body_original, attachments = self._parse_msg_content(msg)
 
             mails.append({
                 "uid": uid,
                 "sender_email": sender_email,
                 "sender_name": sender,
+                "recipient": recipient,
+                "recipient_emails": recipient_emails,
                 "date": date,
                 "subject": subject,
                 "body_text": body_text,
+                # body_text 用于规则/LLM 抽取；body_original 保留完整可读正文，
+                # 供工作台证据区和导出文件展示，避免把清洗后的摘要误称为原文。
+                "body_original": body_original,
                 "body_raw": body_raw,
                 "attachments": attachments,
                 "skip_reason": None,
@@ -295,22 +390,42 @@ class MailReader:
                                 # 图片附件: 持久化到 cache/attachments/, 登记 ocr_pending
                                 # OCR 仅在字段提取兜底阶段按需触发（懒加载）
                                 from utils.attachment_parser import (
-                                    parse_attachment, save_image_attachment,
+                                    parse_attachment,
+                                    sanitize_attachment_filename,
+                                    save_attachment,
                                 )
-                                img_path = save_image_attachment(payload, filename)
-                                att = parse_attachment(img_path, filename)
-                                att["filename"] = filename
-                                attachments.append(att)
+                                safe_filename = sanitize_attachment_filename(filename)
+                                try:
+                                    img_path = save_attachment(payload, safe_filename)
+                                    att = parse_attachment(img_path, safe_filename)
+                                    att["filename"] = safe_filename
+                                    att["filepath"] = img_path
+                                    attachments.append(att)
+                                except Exception as exc:
+                                    # 单个异常附件不能中断整批邮件；正文和其他附件仍继续解析。
+                                    self._log(
+                                        f"图片附件保存/解析失败，已跳过: {safe_filename} ({exc})",
+                                        "warning",
+                                    )
                             else:
+                                from utils.attachment_parser import (
+                                    parse_attachment,
+                                    sanitize_attachment_filename,
+                                    save_attachment,
+                                )
+                                safe_filename = sanitize_attachment_filename(filename)
+                                # 解析仍使用临时文件，但原始附件同时持久化，
+                                # 使工作台之后可以真正打开/下载 xlsx、pdf、zip 等。
+                                stored_path = save_attachment(payload, safe_filename)
                                 with tempfile.NamedTemporaryFile(
                                     delete=False, suffix=ext
                                 ) as tmp:
                                     tmp.write(payload)
                                     tmp_path = tmp.name
                                 try:
-                                    from utils.attachment_parser import parse_attachment
-                                    att = parse_attachment(tmp_path, filename)
-                                    att["filename"] = filename
+                                    att = parse_attachment(tmp_path, safe_filename)
+                                    att["filename"] = safe_filename
+                                    att["filepath"] = stored_path
                                     attachments.append(att)
                                     # 压缩包内的待识别图片合并进附件列表（懒加载 OCR）
                                     for p in att.pop("pending_images", []):
@@ -345,5 +460,6 @@ class MailReader:
                 else:
                     body_text = raw
 
+        body_original = body_text
         body_text = _simplify_body(body_text)
-        return body_text, body_raw, attachments
+        return body_text, body_raw, body_original, attachments

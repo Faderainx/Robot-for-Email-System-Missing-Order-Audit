@@ -1,0 +1,579 @@
+"""德国 WEEE 品牌/品类与注册工单品类明细核对。
+
+这个模块只做两件事：
+
+* 从邮件正文、主题及附件结构化行中读取明确出现的“品牌/品类”；
+* 将这些值与注册工单查询结果中明确标注的品类字段逐项比对。
+
+没有明确证据时返回 ``pending``，不根据产品常识或数字猜测品类。
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from typing import Any, Dict, Iterable, List, Sequence
+
+
+GERMANY_ALIASES = ("德国", "德國", "germany", "german", "deutschland", "de")
+WEEE_RE = re.compile(r"(?<![A-Za-z])WEEE(?![A-Za-z])", re.I)
+WEEE_RULE_SOURCE = "产品分类表 中文版.docx（德国 ElektroG/WEEE 六类）"
+
+_BRAND_KEYS = (
+    "品牌", "品牌名称", "品牌名", "brand", "brand name", "marke",
+)
+_CATEGORY_KEYS = (
+    "品类", "品類", "类别", "類別", "产品类别", "產品類別", "商品类别",
+    "商品類別", "产品分类", "產品分類", "设备类别", "設備類別", "注册类别",
+    "注册品类", "申报品类", "申報品類", "category", "product category",
+    "product type", "warengruppe", "produktkategorie",
+)
+_WORKORDER_CATEGORY_KEYS = _CATEGORY_KEYS + (
+    "品类明细", "品類明細", "类别明细", "類別明細", "分类明细", "分類明細",
+    "品类名称", "品類名稱", "类别名称", "類別名稱", "品类名", "类别名",
+    "注册类型明细", "产品信息", "商品信息", "产品名称", "商品名称",
+    "服务品类", "服务类别", "category name", "product name",
+)
+
+# 《产品分类表 中文版.docx》中的德国 ElektroG/WEEE 六类边界。
+# 这里保存“能直接从邮件/附件文字判断”的短语，不把产品名称强行猜成类别：
+# 命中多个类别或只命中泛化词时，后续结果会标记为 pending 交人工确认。
+WEEE_CATEGORY_DEFINITIONS = {
+    "1": {
+        "name": "热交换设备",
+        "aliases": (
+            "热交换设备", "温度交换设备", "制冷设备", "冷却设备", "冰箱", "冰柜",
+            "冷冻设备", "饮料冷却器", "冷藏柜台", "冷水机", "冷热饮水机", "空调",
+            "热泵", "热泵干燥机", "含油散热器", "工业压缩机", "冷却循环器",
+            "heat exchange", "temperature exchange", "refrigerator", "freezer",
+            "cooling equipment", "air conditioner", "air conditioning", "heat pump",
+            "compressor", "chiller", "dehumidifier", "冷却/冷冻",
+            "wärmeüberträger", "temperaturüberträger", "kühlgerät", "kühlschrank",
+            "gefrierschrank", "klimagerät", "wärmepumpe", "entfeuchter",
+        ),
+        "excludes": ("无冷却功能", "不带冷却功能", "without cooling"),
+    },
+    "2": {
+        "name": "屏幕和显示设备",
+        "aliases": (
+            "屏幕", "显示器", "监视器", "电视机", "电视", "电子书阅读器", "阅读器",
+            "笔记本电脑", "笔记本", "平板电脑", "lcd", "led屏", "oled", "触摸屏",
+            "投影屏幕", "视频显示器", "图形显示器", "相框", "screen", "display",
+            "monitor", "television", "tv", "laptop", "notebook", "tablet", "e-reader",
+            "touchscreen", "projector screen",
+            "bildschirmgeräte", "bildschirm", "fernseher",
+        ),
+        "excludes": (),
+    },
+    "3": {
+        "name": "灯具和光源",
+        "aliases": (
+            "气体放电灯", "放电灯", "荧光灯", "紧凑型荧光灯", "节能灯", "led灯",
+            "led灯泡", "led灯丝灯", "金属卤化物灯", "霓虹灯", "汞蒸汽灯", "紫外线灯",
+            "灯具", "照明器具", "路灯", "照明灯", "灯泡", "lamp", "luminaire",
+            "lighting", "fluorescent", "discharge lamp", "led lamp", "bulb", "neon",
+            "street light", "uv lamp",
+            "lampen", "leuchte", "entladungslampe", "led-lampe",
+        ),
+        # docx 明确说明传统白炽灯/卤素灯不在 ElektroG 第 3 类范围。
+        "excludes": ("白炽灯", "卤素灯", "incandescent", "halogen"),
+    },
+    "4": {
+        "name": "大型设备",
+        "aliases": (
+            "大型设备", "大件设备", "大型家电", "大型电气设备", "大型光伏电池板",
+            "光伏电池板", "太阳能电池板", "工业设备", "商业厨房设备", "电动医院病床",
+            "大型医疗设备", "自动售货机", "取款机", "充电站", "电动汽车充电柱",
+            "电机", "发电机", "打印机", "复印机", "大型打印机", "大型it设备", "large equipment",
+            "large appliance", "industrial equipment", "pv panel", "solar panel",
+            "vending machine", "atm", "charging station", "large printer",
+            "großgeräte", "großgerät", "großes gerät",
+        ),
+        "excludes": ("小型", "small", "不超过50厘米", "<=50cm", "50 cm or less"),
+    },
+    "5": {
+        "name": "小型设备",
+        "aliases": (
+            "小型设备", "小家电", "小型家电", "小型电气设备", "小型光伏电池板",
+            "小型工具", "吸尘器", "咖啡机", "微波炉", "风扇", "加湿器", "电动工具",
+            "玩具", "耳机", "扬声器", "摄像机", "照相机", "无人机", "智能手表",
+            "体温计", "电动牙刷", "充电器", "插座", "延长线", "电缆", "电源适配器",
+            "small equipment", "small appliance", "vacuum cleaner", "microwave",
+            "fan", "humidifier", "power tool", "toy", "headphone", "speaker",
+            "camera", "drone", "smartwatch", "thermometer", "charger", "socket",
+            "extension cable", "adapter", "cable",
+            "kleingeräte", "kleingerät", "kleine geräte",
+        ),
+        "excludes": ("屏幕面积大于100", "大于100平方厘米", ">100 cm2", "large equipment"),
+    },
+    "6": {
+        "name": "小型信息和电信设备",
+        "aliases": (
+            "小型信息和电信设备", "小型it设备", "信息技术设备", "电信设备", "电脑",
+            "个人电脑", "计算机", "服务器", "打印机", "扫描仪", "路由器", "交换机",
+            "网络设备", "收银机", "读卡器", "电话", "手机", "移动电话", "智能手机",
+            "传真机", "硬盘", "键盘", "鼠标", "内存卡", "usb", "网线", "电话线",
+            "显示端口电缆", "hdmi电缆", "小型itk", "small it", "it equipment",
+            "telecommunication", "computer", "pc", "server", "printer", "scanner",
+            "router", "switch", "cash register", "card reader", "telephone", "mobile phone",
+            "smartphone", "fax", "hard drive", "keyboard", "mouse", "memory card",
+            "usb cable", "network cable", "ethernet", "itk",
+            "kleine it", "kleine informations- und telekommunikationsgeräte",
+            "telekommunikationsgerät",
+        ),
+        # 第 6 类是“外部尺寸不超过 50 厘米”的 IT/通信设备；大 IT 归第 4 类，
+        # 大于 100 cm² 的主要显示设备归第 2 类。
+        "excludes": ("大型it", "大于100平方厘米", ">100 cm2", "屏幕面积大于100", "large it"),
+    },
+}
+
+_CATEGORY_LABEL_RE = re.compile(
+    r"(?:第\s*([1-6])\s*类|(?:category|class|klasse)\s*([1-6])|类别\s*([1-6])|分类\s*([1-6]))",
+    re.I,
+)
+
+
+def _text(value: Any) -> str:
+    return str(value or "").replace("\u3000", " ").strip()
+
+
+def _norm(value: Any) -> str:
+    text = _text(value).casefold()
+    return re.sub(r"[\s\-_/.,，。:：;；|+＋()（）\[\]【】{}]+", "", text)
+
+
+def _norm_product(value: Any) -> str:
+    """产品分类匹配用的规范化文本。
+
+    保留数字（如 100 cm²）用于排除规则，去掉 HTML 空格和常见分隔符，
+    但不做词干化或同义词臆测。
+    """
+    text = _text(value)
+    text = re.sub(r"&(?:nbsp|amp);", " ", text, flags=re.I)
+    text = text.replace("平方厘米", "cm2").replace("厘米", "cm")
+    text = text.replace("㎝", "cm").replace("²", "2")
+    return re.sub(r"[\s\-_/.,，。:：;；|+＋()（）\[\]【】{}'\"“”‘’]+", "", text.casefold())
+
+
+def _category_id_from_label(value: Any) -> str:
+    text = _text(value)
+    match = _CATEGORY_LABEL_RE.search(text)
+    if not match:
+        return ""
+    return next((group for group in match.groups() if group), "")
+
+
+def _category_alias_hits(value: Any) -> List[Dict[str, Any]]:
+    """根据产品/品类文字返回六类候选及命中证据。"""
+    raw = _text(value)
+    normalized = _norm_product(raw)
+    if not normalized:
+        return []
+    explicit = _category_id_from_label(raw)
+    if explicit:
+        return [{"category_class": explicit, "category_class_name": WEEE_CATEGORY_DEFINITIONS[explicit]["name"],
+                 "score": 1000, "evidence": raw, "reason": "命中分类表中的明确类别编号"}]
+
+    hits: Dict[str, Dict[str, Any]] = {}
+    for class_id, definition in WEEE_CATEGORY_DEFINITIONS.items():
+        if any(_norm_product(ex) and _norm_product(ex) in normalized for ex in definition.get("excludes", ())):
+            continue
+        for alias in definition["aliases"]:
+            alias_norm = _norm_product(alias)
+            if not alias_norm or alias_norm not in normalized:
+                continue
+            # 单字/极泛的词（如“灯”“电话”）证据弱；完整短语证据强。
+            score = len(alias_norm) * 3
+            if len(alias_norm) <= 1:
+                score = 2
+            elif len(alias_norm) <= 2:
+                # “手机/电脑/空调/热泵”等二字产品词是分类表中的明确条目；
+                # 只有单字泛词才保持弱命中。
+                score = 12 if alias_norm == normalized else 6
+            elif len(alias_norm) <= 4:
+                score = max(score, 12)
+            hit = hits.setdefault(class_id, {
+                "category_class": class_id,
+                "category_class_name": definition["name"],
+                "score": 0,
+                "evidence": [],
+                "reason": "产品分类表关键词命中",
+            })
+            if score > hit["score"]:
+                hit["score"] = score
+            if alias not in hit["evidence"]:
+                hit["evidence"].append(alias)
+    return sorted(hits.values(), key=lambda item: (-item["score"], item["category_class"]))
+
+
+def classify_weee_product(value: Any) -> Dict[str, Any]:
+    """按产品分类表给单个品牌/品类文字归类。
+
+    返回 ``matched``、``ambiguous`` 或 ``unmatched``。只有唯一高置信命中才
+    进入自动比对；跨类别命中或只剩弱词命中都保持待人工确认。
+    """
+    raw = _clean_candidate(value)
+    if not raw:
+        return {"status": "unmatched", "category_class": "", "category_class_name": "", "candidates": [], "evidence": []}
+    hits = _category_alias_hits(raw)
+    if not hits:
+        return {"status": "unmatched", "category_class": "", "category_class_name": "", "candidates": [], "evidence": []}
+    top = hits[0]
+    # 明确类别编号或足够长的完整词组可自动确认；若第二候选相近则不自动猜。
+    if top["score"] >= 1000:
+        status = "matched"
+    elif top["score"] >= 12 and (len(hits) == 1 or top["score"] > hits[1]["score"] * 1.35):
+        status = "matched"
+    elif top["score"] >= 8:
+        status = "ambiguous"
+    else:
+        status = "unmatched"
+    return {
+        "status": status,
+        "category_class": top["category_class"] if status == "matched" else "",
+        "category_class_name": top["category_class_name"] if status == "matched" else "",
+        "candidates": [{
+            "category_class": hit["category_class"],
+            "category_class_name": hit["category_class_name"],
+            "score": hit["score"],
+        } for hit in hits],
+        "evidence": top.get("evidence", []),
+    }
+
+
+def _flatten_values(value: Any) -> List[str]:
+    """展开工单品类字段里常见的 list/dict/JSON 结构。"""
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        values: List[str] = []
+        for key, child in value.items():
+            if key in {"status", "reason", "score"}:
+                continue
+            values.extend(_flatten_values(child))
+        return values
+    if isinstance(value, (list, tuple, set)):
+        values: List[str] = []
+        for child in value:
+            values.extend(_flatten_values(child))
+        return values
+    return _split_values(value)
+
+
+def _nested_alias_values(value: Any, aliases: Sequence[str]) -> List[str]:
+    """从品类明细的嵌套记录中只取品类字段，避免把编号/品牌当品类。"""
+    if isinstance(value, dict):
+        values: List[str] = []
+        for key, child in value.items():
+            key_norm = re.sub(r"\s+", "", _text(key).casefold())
+            if any(re.sub(r"\s+", "", alias.casefold()) in key_norm for alias in aliases):
+                values.extend(_flatten_values(child))
+            elif key_norm in {"data", "rows", "records", "items", "品类明细", "品類明細"}:
+                values.extend(_nested_alias_values(child, aliases))
+        return values
+    if isinstance(value, (list, tuple, set)):
+        values: List[str] = []
+        for child in value:
+            values.extend(_nested_alias_values(child, aliases))
+        return values
+    return _split_values(value)
+
+
+def _split_values(value: Any) -> List[str]:
+    text = _text(value)
+    if not text:
+        return []
+    values = re.split(r"[\n\r,，;；、|/／]+", text)
+    return [item.strip(" \t:：-—") for item in values if item.strip(" \t:：-—")]
+
+
+def is_germany_weee(project: Any = "", subject: Any = "", body: Any = "", attachments: Any = None) -> bool:
+    """只在明确出现德国与 WEEE 的邮件/项目上启用专项规则。"""
+    project_text = _text(project)
+    text_parts = [project_text, _text(subject), _text(body)]
+    for attachment in attachments or []:
+        if isinstance(attachment, dict):
+            text_parts.extend((_text(attachment.get("filename")), _text(attachment.get("text_content"))))
+    text = " ".join(text_parts)
+    has_germany = any(
+        bool(re.search(r"(?<![A-Za-z])DE(?![A-Za-z])", text, re.I))
+        if alias.casefold() == "de"
+        else alias.casefold() in text.casefold()
+        for alias in GERMANY_ALIASES
+    )
+    return bool(has_germany and WEEE_RE.search(text))
+
+
+def _label_value_pairs(text: str, labels: Sequence[str]) -> List[tuple[str, str]]:
+    """读取“品牌：xxx / 类别：yyy”这类明确标签，不抓整段自然语言。"""
+    if not text:
+        return []
+    label_pattern = "|".join(re.escape(label) for label in sorted(labels, key=len, reverse=True))
+    stop_pattern = "|".join(re.escape(label) for label in sorted(set(labels) | set(_BRAND_KEYS) | set(_CATEGORY_KEYS), key=len, reverse=True))
+    # 值到下一个标签、换行或分隔符为止；允许英文品牌包含空格和点号。
+    pattern = re.compile(
+        rf"(?:^|[\n\r;；|\s])\s*(?P<label>{label_pattern})\s*[:：=＝]\s*"
+        rf"(?P<value>[^\n\r;；|]+?)(?=\s*(?:{stop_pattern})\s*[:：=＝]|\s*(?:[;；|]|$))", re.I,
+    )
+    return [(_text(match.group("label")), _text(match.group("value"))) for match in pattern.finditer(text)]
+
+
+def _clean_candidate(value: Any) -> str:
+    text = _text(value).strip(" \t:：-—_，,;；")
+    if not text or len(text) > 180:
+        return ""
+    # 不能把业务标签、数量或整句说明当品牌/品类。
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        return ""
+    if re.search(r"^(?:无|未知|待确认|待定|暂无|n/?a|none|nil)$", text, re.I):
+        return ""
+    return text
+
+
+def _record_values(record: Dict[str, Any], keys: Sequence[str]) -> List[str]:
+    values: List[str] = []
+    lowered = {re.sub(r"\s+", "", str(key).casefold()): value for key, value in record.items()}
+    for alias in keys:
+        alias_key = re.sub(r"\s+", "", alias.casefold())
+        for key, value in lowered.items():
+            if key == alias_key or alias_key in key:
+                values.extend(_split_values(value))
+    return [_clean_candidate(value) for value in values if _clean_candidate(value)]
+
+
+def _dedupe(values: Iterable[str]) -> List[str]:
+    result: List[str] = []
+    seen = set()
+    for value in values:
+        cleaned = _clean_candidate(value)
+        key = _norm(cleaned)
+        if cleaned and key and key not in seen:
+            seen.add(key)
+            result.append(cleaned)
+    return result
+
+
+def extract_weee_items(
+    subject: Any = "",
+    body: Any = "",
+    attachments: Any = None,
+    project: Any = "",
+) -> Dict[str, Any]:
+    """提取德国 WEEE 的品牌/品类证据。
+
+    附件结构化行优先；正文/标题只有出现显式标签时才采用。
+    ``items`` 每项至少包含 ``category`` 或被标记为待人工确认的证据。
+    """
+    attachments = attachments or []
+    if not is_germany_weee(project, subject, body, attachments):
+        return {"enabled": False, "items": [], "status": "not_applicable", "sources": []}
+
+    items: List[Dict[str, Any]] = []
+    sources: List[str] = []
+    for attachment in attachments:
+        if not isinstance(attachment, dict):
+            continue
+        filename = _text(attachment.get("filename")) or "附件"
+        for record in attachment.get("structured_records") or []:
+            if not isinstance(record, dict):
+                continue
+            brands = _record_values(record, _BRAND_KEYS)
+            categories = _record_values(record, _CATEGORY_KEYS)
+            if not brands and not categories:
+                continue
+            source = (
+                f"附件表格：{filename} / {_text(record.get('sheet_name')) or '工作表'} "
+                f"第{_text(record.get('row_number')) or '?'}行"
+            )
+            for brand in brands or [""]:
+                for category in categories or [""]:
+                    items.append({
+                        "brand": brand,
+                        "category": category,
+                        "source": source,
+                        "evidence": _text(record.get("raw_text")) or " | ".join(_text(c) for c in record.get("cells") or []),
+                        "confidence": "high" if category else "medium",
+                    })
+            sources.append(source)
+
+    mail_text = _text(subject) + "\n" + _text(body)
+    brand_pairs = _label_value_pairs(mail_text, _BRAND_KEYS)
+    category_pairs = _label_value_pairs(mail_text, _CATEGORY_KEYS)
+    if brand_pairs and category_pairs:
+        # 同一封邮件通常按“品牌1/品类1；品牌2/品类2”排列；按出现顺序配对，
+        # 数量不一致时只配已有项，其余仍保留为待人工核对，不跨行猜测。
+        pair_count = max(len(brand_pairs), len(category_pairs))
+        for index in range(pair_count):
+            brand_label, brand_value = brand_pairs[index] if index < len(brand_pairs) else ("", "")
+            category_label, category_value = category_pairs[index] if index < len(category_pairs) else ("", "")
+            items.append({
+                "brand": _clean_candidate(brand_value),
+                "category": _clean_candidate(category_value),
+                "source": "邮件正文/标题",
+                "evidence": "；".join(part for part in (
+                    f"{brand_label}：{brand_value}" if brand_label else "",
+                    f"{category_label}：{category_value}" if category_label else "",
+                ) if part),
+                "confidence": "medium",
+            })
+            sources.append("邮件正文/标题")
+    else:
+        for label, value in brand_pairs:
+            items.append({"brand": _clean_candidate(value), "category": "", "source": "邮件正文/标题", "evidence": f"{label}：{value}", "confidence": "medium"})
+            sources.append("邮件正文/标题")
+        for label, value in category_pairs:
+            items.append({"brand": "", "category": _clean_candidate(value), "source": "邮件正文/标题", "evidence": f"{label}：{value}", "confidence": "medium"})
+            sources.append("邮件正文/标题")
+
+    # 按品牌/品类证据合并，避免同一行被附件和正文重复展示。
+    merged: Dict[tuple[str, str], Dict[str, Any]] = {}
+    for item in items:
+        brand = _clean_candidate(item.get("brand"))
+        category = _clean_candidate(item.get("category"))
+        if not brand and not category:
+            continue
+        key = (_norm(brand), _norm(category))
+        current = merged.setdefault(key, {"brand": brand, "category": category, "sources": [], "evidences": [], "confidence": item.get("confidence", "medium")})
+        if brand and not current.get("brand"):
+            current["brand"] = brand
+        if category and not current.get("category"):
+            current["category"] = category
+        for name in ("source", "evidence"):
+            value = _text(item.get(name))
+            target_key = "sources" if name == "source" else "evidences"
+            if value and value not in current[target_key]:
+                current[target_key].append(value)
+
+    result_items = list(merged.values())
+    for item in result_items:
+        item["evidence"] = "；".join(item.get("evidences") or [])
+        # 不覆盖原始品类文字；分类表归类只是一个可追溯的派生字段。
+        category_text = item.get("category") or item.get("brand") or ""
+        classification = classify_weee_product(category_text)
+        item["category_original"] = category_text
+        item["category_class"] = classification.get("category_class", "")
+        item["category_class_name"] = classification.get("category_class_name", "")
+        item["category_class_status"] = classification.get("status", "unmatched")
+        item["category_candidates"] = classification.get("candidates", [])
+        item["category_class_evidence"] = classification.get("evidence", [])
+        item["category_rule_source"] = WEEE_RULE_SOURCE
+    if not result_items:
+        status = "pending"
+    elif any(
+        not item.get("category")
+        or item.get("category_class_status") != "matched"
+        for item in result_items
+    ):
+        status = "pending"
+    else:
+        status = "ready"
+    return {
+        "enabled": True,
+        "items": result_items,
+        "status": status,
+        "sources": _dedupe(sources),
+    }
+
+
+def _json_items(value: Any) -> List[Dict[str, Any]]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    text = _text(value)
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    return [item for item in parsed if isinstance(item, dict)] if isinstance(parsed, list) else []
+
+
+def _workorder_values(row: Dict[str, Any], aliases: Sequence[str]) -> List[str]:
+    values: List[str] = []
+    for key, value in row.items():
+        key_norm = re.sub(r"\s+", "", _text(key).casefold())
+        if any(re.sub(r"\s+", "", alias.casefold()) in key_norm for alias in aliases):
+            if isinstance(value, (dict, list, tuple, set)):
+                nested = _nested_alias_values(value, aliases)
+                values.extend(nested or _flatten_values(value))
+            else:
+                values.extend(_split_values(value))
+    return _dedupe(values)
+
+
+def compare_weee_categories(items: Any, workorders: Iterable[Dict[str, Any]] = ()) -> Dict[str, Any]:
+    """逐项比较邮件品类和注册工单品类。"""
+    mail_items = _json_items(items)
+    orders = [row for row in (workorders or []) if isinstance(row, dict)]
+    order_categories = _dedupe(value for row in orders for value in _workorder_values(row, _WORKORDER_CATEGORY_KEYS))
+    order_brands = _dedupe(value for row in orders for value in _workorder_values(row, _BRAND_KEYS))
+    order_classifications = []
+    for value in order_categories:
+        classification = classify_weee_product(value)
+        if classification.get("status") == "matched":
+            order_classifications.append({
+                "raw": value,
+                "category_class": classification.get("category_class"),
+                "category_class_name": classification.get("category_class_name"),
+            })
+    checked: List[Dict[str, Any]] = []
+    for item in mail_items:
+        brand = _clean_candidate(item.get("brand"))
+        category = _clean_candidate(item.get("category"))
+        if not category:
+            checked.append({**item, "status": "pending", "reason": "邮件未提取到明确品类"})
+            continue
+        mail_class = item.get("category_class") or ""
+        if not mail_class:
+            inferred = classify_weee_product(category)
+            if inferred.get("status") == "matched":
+                mail_class = inferred.get("category_class")
+        category_hit = any(
+            _norm(category) == _norm(value)
+            or _norm(category) in _norm(value)
+            or _norm(value) in _norm(category)
+            for value in order_categories
+        )
+        class_hit = bool(mail_class and any(item2.get("category_class") == mail_class for item2 in order_classifications))
+        category_hit = category_hit or class_hit
+        brand_hit = not brand or not order_brands or any(_norm(brand) == _norm(value) or _norm(brand) in _norm(value) or _norm(value) in _norm(brand) for value in order_brands)
+        if not order_categories:
+            status, reason = "pending", "注册工单未返回品类明细字段"
+        elif category_hit and brand_hit:
+            status, reason = "matched", "工单品类明细已找到"
+        elif category_hit:
+            status, reason = "pending", "品类已找到但品牌需人工核对"
+        else:
+            status, reason = "missing", "注册工单品类明细中未找到对应品类"
+        checked.append({**item, "status": status, "reason": reason})
+    if not checked:
+        overall = "pending"
+        reason = "邮件未提取到明确品牌/品类"
+    elif any(item["status"] == "missing" for item in checked):
+        overall, reason = "missing", "至少一项邮件品类未出现在注册工单品类明细"
+    elif any(item["status"] == "pending" for item in checked):
+        overall, reason = "pending", "品类明细不完整，需人工核对"
+    else:
+        overall, reason = "matched", "邮件品类与注册工单品类明细全部对应"
+    return {
+        "enabled": bool(mail_items),
+        "status": overall,
+        "reason": reason,
+        "items": checked,
+        "workorder_categories": order_categories,
+        "workorder_category_classes": order_classifications,
+        "workorder_brands": order_brands,
+        "workorder_count": len(orders),
+    }
+
+
+def audit_row(row: Dict[str, Any], workorders: Iterable[Dict[str, Any]] = ()) -> Dict[str, Any]:
+    """从阶段一/阶段二行读取专项字段，便于 Excel 和工作台复用。"""
+    project = row.get("项目") or row.get("标准化项目名称") or row.get("标准化项目")
+    subject = row.get("subject") or row.get("邮件主题") or row.get("主题")
+    body = row.get("body_text") or row.get("邮件正文原文") or row.get("正文(精简)")
+    attachments = row.get("_attachments") or []
+    extracted = {"enabled": _text(row.get("德国WEEE专项")) == "是", "items": _json_items(row.get("德国WEEE品类明细")), "status": "pending"}
+    if not extracted["enabled"]:
+        extracted = extract_weee_items(subject, body, attachments, project)
+    return compare_weee_categories(extracted.get("items") or [], workorders) if extracted.get("enabled") else {"enabled": False, "status": "not_applicable", "items": []}

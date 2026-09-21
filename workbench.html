@@ -1,0 +1,565 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>ECOPV · 邮件询单工作台</title>
+  <style>
+    :root{--nav:#102b36;--nav2:#163d49;--ink:#18313c;--muted:#6b7f88;--line:#dce5e9;--bg:#f3f6f8;--panel:#fff;--green:#087c69;--green2:#e8f5ef;--amber:#9b590b;--warn:#fff3d9;--red:#b13c3c;--red2:#fff0f0;--blue:#1668a5;--shadow:0 8px 24px rgba(17,43,54,.08)}
+    *{box-sizing:border-box}body{margin:0;color:var(--ink);font-family:"Segoe UI","Microsoft YaHei",Arial,sans-serif;background:var(--bg);font-size:14px}.shell{min-height:100vh;display:grid;grid-template-columns:210px 1fr}.side{background:var(--nav);color:#dce8eb;padding:22px 14px;display:flex;flex-direction:column}.brand{padding:0 12px 25px;border-bottom:1px solid rgba(255,255,255,.12);letter-spacing:.08em;font-weight:700;font-size:14px}.brand small{display:block;color:#80acae;font-size:10px;letter-spacing:.15em;margin-top:8px}.nav{padding-top:18px}.nav button{width:100%;border:0;text-align:left;background:transparent;color:#a9c1c5;padding:12px 13px;border-radius:8px;margin:2px 0;cursor:pointer;font-family:inherit}.nav button.active,.nav button:hover{background:var(--nav2);color:#fff}.nav i{width:23px;display:inline-block;font-style:normal;color:#7db2ae}.side-foot{margin-top:auto;padding:15px 12px 2px;font-size:11px;color:#7f9ca2;line-height:1.7}.main{min-width:0}.top{height:82px;background:#fff;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 30px}.crumb{font-size:12px;color:var(--muted)}h1{margin:6px 0 0;font-size:25px;letter-spacing:-.03em}.top-actions{display:flex;gap:9px;align-items:center}.btn{border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:7px;padding:9px 14px;cursor:pointer;font:inherit}.btn:hover{border-color:#9bb4bc;background:#f7fafb}.btn:disabled{opacity:.55;cursor:not-allowed}.btn.primary{background:var(--green);border-color:var(--green);color:#fff}.btn.danger{color:var(--red);border-color:#efcccc}.btn.small{padding:6px 10px;font-size:12px}.container{padding:24px 30px 34px;max-width:1600px;margin:auto}.banner{background:#eaf4f7;border:1px solid #cfe2e8;border-radius:9px;padding:11px 15px;color:#39626d;margin-bottom:20px;display:flex;justify-content:space-between;align-items:center}.banner b{color:var(--ink)}.stats{display:grid;grid-template-columns:repeat(5,minmax(130px,1fr));gap:13px;margin-bottom:21px}.stat{background:#fff;border:1px solid var(--line);border-radius:10px;padding:15px 17px;box-shadow:0 2px 8px rgba(17,43,54,.03)}.stat .num{font-size:28px;font-weight:700;line-height:1.1}.stat .label{margin-top:7px;color:var(--muted);font-size:12px}.stat.green .num{color:var(--green)}.stat.amber .num{color:var(--amber)}.stat.red .num{color:var(--red)}.work{display:grid;grid-template-columns:285px minmax(430px,1fr) 335px;gap:14px;min-height:650px}.card{background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);min-width:0}.queue{display:flex;flex-direction:column;overflow:hidden}.card-head{padding:16px 17px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between}.card-head h2{font-size:15px;margin:0}.muted{color:var(--muted)}.queue-tools{padding:11px;border-bottom:1px solid var(--line)}.search{width:100%;border:1px solid var(--line);border-radius:6px;padding:9px 10px;font:inherit;outline:none}.search:focus{border-color:#72a9a3}.filters{display:flex;gap:5px;margin-top:8px}.filters button{flex:1;border:1px solid transparent;background:#f3f6f7;color:var(--muted);border-radius:5px;padding:6px 3px;font-size:11px;cursor:pointer}.filters button.on{background:var(--green2);color:var(--green);border-color:#bfdfd4}.queue-selectbar{display:flex;align-items:center;gap:6px;margin-top:8px}.queue-selectbar .btn{flex:1}.queue-selectbar .selected-count{font-size:11px;color:var(--muted);white-space:nowrap}.queue-list{overflow:auto;padding:5px}.mail-item{padding:12px 11px;border-bottom:1px solid #edf1f2;cursor:pointer;border-left:3px solid transparent}.mail-item:hover{background:#f7fafb}.mail-item.active{background:#f0f8f5;border-left-color:var(--green)}.mail-line{display:flex;align-items:flex-start;gap:7px;min-width:0}.mail-select{margin:3px 0 0;accent-color:var(--green);flex:0 0 auto}.mail-line .mail-subject{min-width:0;flex:1}.mail-subject{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:6px}.mail-meta{font-size:11px;color:var(--muted);display:flex;justify-content:space-between;gap:5px}.pill{display:inline-flex;align-items:center;border-radius:99px;padding:3px 8px;font-size:11px;white-space:nowrap}.pill.review{background:var(--warn);color:var(--amber)}.pill.ready{background:#e9f2fb;color:var(--blue)}.pill.confirmed{background:var(--green2);color:var(--green)}.pill.returned,.pill.needs_info{background:var(--red2);color:var(--red)}.detail{display:flex;flex-direction:column;overflow:hidden}.detail-head{padding:18px 20px;border-bottom:1px solid var(--line)}.detail-title{font-size:20px;font-weight:700;line-height:1.35;margin:6px 0 9px}.detail-meta{color:var(--muted);font-size:12px;display:flex;flex-wrap:wrap;gap:12px}.detail-actions{display:flex;gap:8px;margin-top:15px;flex-wrap:wrap}.agent-row{padding:12px 20px;background:#fbfcfc;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}.agent-row strong{font-size:14px}.agent-row .agent-state{font-size:12px;color:var(--amber)}.steps{display:grid;grid-template-columns:repeat(5,1fr);padding:15px 20px;border-bottom:1px solid var(--line);gap:8px}.step{font-size:11px;color:var(--muted);position:relative;padding-left:20px}.step:before{content:"";position:absolute;left:0;top:1px;width:13px;height:13px;border-radius:50%;background:#dce6e9}.step.done{color:var(--green)}.step.done:before{background:var(--green);box-shadow:inset 0 0 0 3px #e5f4ee}.step.active{color:var(--amber);font-weight:600}.step.active:before{background:#e5ad55}.tabs{display:flex;padding:0 20px;border-bottom:1px solid var(--line);gap:20px}.tabs button{border:0;background:transparent;padding:13px 3px 11px;color:var(--muted);border-bottom:2px solid transparent;cursor:pointer;font:inherit}.tabs button.active{color:var(--green);border-bottom-color:var(--green);font-weight:600}.detail-body{padding:17px 20px;overflow:auto;flex:1}.section-title{font-size:13px;font-weight:700;margin:0 0 11px}.detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.business{border:1px solid var(--line);border-radius:8px;padding:12px;background:#fff;cursor:pointer;position:relative}.business.selected{border-color:#7db8ab;box-shadow:0 0 0 2px #e3f2ee}.business .row{display:grid;grid-template-columns:66px 1fr;gap:8px;padding:3px 0}.business .key{color:var(--muted);font-size:12px}.business .value{font-weight:600;word-break:break-word}.business .card-foot{border-top:1px solid #edf1f2;margin-top:8px;padding-top:8px;display:flex;justify-content:space-between;align-items:center}.empty{padding:50px 20px;text-align:center;color:var(--muted)}.raw{white-space:pre-wrap;background:#f7fafb;border:1px solid var(--line);border-radius:7px;padding:14px;line-height:1.7;max-height:360px;overflow:auto}.attachment{display:inline-block;background:#edf3f5;border-radius:5px;padding:5px 8px;margin:0 5px 6px 0;font-size:12px}.evidence{padding:17px 17px;overflow:auto}.evidence h3{margin:0 0 5px;font-size:15px}.evidence-sub{font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:13px}.ev-card{border:1px solid var(--line);border-radius:8px;padding:11px;margin-bottom:9px}.ev-label{font-weight:600;font-size:12px;margin-bottom:7px}.ev-line{font-size:12px;line-height:1.6}.ev-line span{color:var(--muted)}.source{display:inline-block;color:var(--blue);font-size:11px;background:#edf5fb;border-radius:4px;padding:2px 5px;margin-top:6px}.events{border-top:1px solid var(--line);margin-top:14px;padding-top:13px}.event{font-size:11px;color:var(--muted);padding:7px 0;border-bottom:1px dashed #edf1f2}.event b{color:var(--ink)}.footnote{font-size:11px;color:var(--muted);margin-top:12px;line-height:1.6}.overlay{position:fixed;inset:0;background:rgba(13,34,42,.38);display:none;align-items:center;justify-content:center;padding:18px;z-index:20}.overlay.show{display:flex}.modal{background:#fff;width:min(620px,100%);border-radius:12px;box-shadow:0 22px 60px rgba(0,0,0,.2);overflow:hidden}.modal-head{padding:16px 20px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}.modal-head h2{font-size:17px;margin:0}.modal-body{padding:18px 20px}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.field label{display:block;color:var(--muted);font-size:12px;margin-bottom:5px}.field input,.field textarea{width:100%;border:1px solid var(--line);border-radius:6px;padding:9px;font:inherit;outline:none}.field textarea{min-height:90px;resize:vertical}.field.full{grid-column:1/-1}.modal-foot{padding:13px 20px;border-top:1px solid var(--line);display:flex;justify-content:flex-end;gap:8px}.toast{position:fixed;right:25px;bottom:23px;z-index:30;background:var(--nav);color:#fff;padding:11px 15px;border-radius:7px;display:none;box-shadow:var(--shadow)}.toast.show{display:block}@media(max-width:1200px){.work{grid-template-columns:245px minmax(380px,1fr)}.evidence{grid-column:1/-1;min-height:280px}.stats{grid-template-columns:repeat(3,1fr)}}@media(max-width:780px){.shell{display:block}.side{display:none}.top{padding:0 16px}.container{padding:16px}.work{display:block}.queue,.detail,.evidence{margin-bottom:14px;min-height:350px}.stats{grid-template-columns:repeat(2,1fr)}.form-grid{grid-template-columns:1fr}.field.full{grid-column:auto}.steps{grid-template-columns:repeat(2,1fr)}}
+<style>
+  .attachment-link{color:var(--ink);text-decoration:none;border:1px solid #d7e5e8;cursor:pointer}
+  .attachment-link:hover{border-color:#72a9a3;background:#e8f5f1}
+  .attachment-link small{color:var(--green);margin-left:7px;font-size:10px}
+</style>
+  <style>
+    .field select{width:100%;border:1px solid var(--line);border-radius:6px;padding:9px;font:inherit;outline:none;background:#fff;color:var(--ink)}
+    /* 工作台桌面布局：整页锁定在一个视口内，各内容区独立滚动。 */
+    html,body{height:100%;overflow:hidden}
+    .shell{width:100%;max-width:none;height:100vh;min-height:0;grid-template-columns:210px minmax(0,1fr);overflow:hidden}
+    .main{width:100%;height:100vh;min-height:0;display:flex;flex-direction:column}
+    .top{height:68px;min-height:68px;flex:0 0 68px;padding:0 24px}
+    h1{font-size:21px}
+    /* 旧规则遗留的 margin:auto 会使 flex 子项按内容宽度居中，从而在左右
+       留下大块白边。工作台应占满左侧导航以外的全部可用区域；仅保留内容内边距。 */
+    .container{width:100%;max-width:none;margin:0;align-self:stretch;height:auto;min-height:0;flex:1;overflow:hidden;display:flex;flex-direction:column;padding:14px 24px 16px}
+    /* 顶部说明横条不再占用工作区高度；统计摘要直接贴近页面顶部。 */
+    .banner{display:none}
+    .stats{gap:8px;margin:0 0 8px}
+    .stat{padding:7px 12px;min-height:58px}
+    .stat .num{font-size:21px;line-height:1}
+    .stat .label{margin-top:4px;font-size:11px}
+    .work{height:0;min-height:0;flex:1;overflow:hidden}
+    /* 业务明细与证据面板互换：证据固定在左侧，业务明细占右侧弹性空间。 */
+    @media(min-width:1201px){
+      /* 左侧未完成邮件只承担导航，压缩其宽度；中间字段证据需要同时
+         展示正文、附件名称和表格预览，给它更多弹性空间。右侧业务明细
+         保留足够宽度，避免公司名和项目名被过度折行。 */
+      .work{grid-template-columns:minmax(250px,.55fr) minmax(480px,1.25fr) minmax(460px,1.35fr)}
+      .evidence{grid-column:2;grid-row:1}
+      .detail{grid-column:3;grid-row:1}
+    }
+    @media (max-width:1200px) and (min-width:781px){
+      .work{grid-template-columns:245px minmax(300px,.85fr) minmax(360px,1fr)}
+      .evidence{grid-column:2;grid-row:1}
+      .detail{grid-column:3;grid-row:1}
+    }
+    .queue,.detail,.evidence{min-height:0}
+    .date-tools{display:flex;align-items:center;gap:6px;margin-top:8px;color:var(--muted);font-size:11px}.date-tools label{white-space:nowrap}.date-tools input{min-width:0;flex:1;border:1px solid var(--line);border-radius:5px;padding:6px 7px;color:var(--ink);font:inherit;background:#fff}.date-tools .btn{padding:5px 8px;font-size:11px}
+    .queue-list{flex:1;min-height:0;overflow-y:scroll;scrollbar-width:auto;scrollbar-color:#8ba9b1 #edf3f5}
+    .queue-list::-webkit-scrollbar,.detail-body::-webkit-scrollbar,.evidence::-webkit-scrollbar{width:11px;height:11px}
+    .queue-list::-webkit-scrollbar-track,.detail-body::-webkit-scrollbar-track,.evidence::-webkit-scrollbar-track{background:#edf3f5;border-radius:8px}
+    .queue-list::-webkit-scrollbar-thumb,.detail-body::-webkit-scrollbar-thumb,.evidence::-webkit-scrollbar-thumb{background:#8ba9b1;border:2px solid #edf3f5;border-radius:8px}
+    .detail-body{min-height:0;scrollbar-width:auto;scrollbar-color:#8ba9b1 #edf3f5}
+    .evidence{overflow-y:auto;scrollbar-width:auto;scrollbar-color:#8ba9b1 #edf3f5}
+    .nav-count{display:inline-flex;min-width:20px;justify-content:center;margin-left:5px;padding:1px 5px;border-radius:99px;background:#2c626d;color:#e8f7f4;font-size:10px}
+    .queue-extra{display:flex;justify-content:space-between;gap:8px;margin-top:5px;color:var(--muted);font-size:11px;white-space:nowrap;overflow:hidden}.queue-extra span{overflow:hidden;text-overflow:ellipsis}
+    .mail-item.filtered-item{border-left-color:#d18b4b;background:#fffaf3}
+    .mail-item.filtered-item.active{border-left-color:#b5682e;background:#fff2df}
+    .filter-reason{margin-top:7px;color:#9b612f;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    /* 业务明细采用询单队列式单列纵向浏览，避免多列卡片在窄屏中互相挤压。 */
+    .detail-grid{display:flex;flex-direction:column;gap:10px;align-items:stretch}
+    .business{padding:14px 15px;min-height:142px}
+    .business .row[data-field]{cursor:pointer;border-radius:5px;transition:background .15s ease,box-shadow .15s ease}
+    .business .row[data-field]:hover{background:#f0f8f5}
+    .business .row[data-field].field-selected{background:#e7f4ef;box-shadow:inset 3px 0 0 var(--green)}
+    .business[draggable="true"]{cursor:grab}
+    .business.dragging{opacity:.55;outline:2px dashed #7db8ab;outline-offset:2px}
+    /* 详情头部压缩：把垂直空间还给业务明细；按钮保持单行横向滚动，
+       不再因为“转为已过滤”换行而把明细推到视口之外。 */
+    .detail-head{padding:10px 16px}
+    .detail-head>.pill{font-size:10px;padding:2px 7px}
+    .detail-title{font-size:18px;line-height:1.25;margin:4px 0 6px}
+    .detail-meta{font-size:11px;gap:5px 10px}
+    .detail-head .evidence-sub{font-size:11px;line-height:1.35;margin:5px 0 0!important}
+    .detail-actions{margin-top:8px;gap:6px;flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;padding:0 0 2px;scrollbar-width:thin;scrollbar-color:#8ba9b1 #edf3f5}
+    .detail-actions::-webkit-scrollbar{height:7px}.detail-actions::-webkit-scrollbar-track{background:#edf3f5;border-radius:8px}.detail-actions::-webkit-scrollbar-thumb{background:#8ba9b1;border-radius:8px}
+    .detail-actions .btn{flex:0 0 auto;min-height:36px;padding:7px 10px;font-size:12px;white-space:nowrap}
+    .agent-row{padding:8px 16px}
+    .steps{padding:10px 16px;gap:6px}
+    .tabs{padding:0 16px}
+    .detail-body{padding:12px 16px}
+    .business{padding:10px 12px;min-height:0}
+    .business .row{padding:2px 0}
+    .business .card-foot{margin-top:5px;padding-top:5px}
+    .evidence-hit{color:#b42318;background:#ffe4e1;border-radius:3px;padding:0 2px;font-weight:700}
+    .weee-audit{border:1px solid #cfe2e8;border-radius:7px;background:#f8fbfc;padding:10px;margin:10px 0}.weee-audit .weee-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}.weee-audit .weee-title{font-weight:700;color:var(--ink)}.weee-status{border-radius:99px;padding:3px 8px;font-size:11px}.weee-status.matched{background:#e4f4ed;color:#087c69}.weee-status.missing{background:#fff0ee;color:#b42318}.weee-status.pending{background:#fff5df;color:#a86a0a}.weee-item{padding:6px 0;border-top:1px dashed #dce8eb;font-size:12px;line-height:1.55}.weee-item:first-child{border-top:0}.weee-item b{color:var(--ink)}
+    .xlsx-hit-note{color:#087c69;background:#e8f5ef;border-radius:4px;padding:4px 7px;display:inline-block}
+    .evidence-raw{white-space:pre-wrap;background:#f7fafb;border:1px solid var(--line);border-radius:7px;padding:12px;line-height:1.7;max-height:250px;overflow:auto}
+    .xlsx-preview{overflow:hidden}.xlsx-preview .ev-label{display:flex;justify-content:space-between;gap:8px;align-items:center}.xlsx-sheet{margin-top:9px;border:1px solid var(--line);border-radius:6px;overflow:auto;max-height:430px;background:#fbfcfc;scrollbar-width:auto;scrollbar-color:#8ba9b1 #edf3f5}.xlsx-sheet::-webkit-scrollbar{width:10px;height:10px}.xlsx-sheet::-webkit-scrollbar-track{background:#edf3f5}.xlsx-sheet::-webkit-scrollbar-thumb{background:#8ba9b1;border:2px solid #edf3f5;border-radius:8px}.xlsx-sheet-title{padding:7px 9px;background:#edf3f5;color:var(--ink);font-size:11px;font-weight:600;display:flex;justify-content:space-between;gap:8px;position:sticky;top:0;z-index:3}.xlsx-sheet-hint{color:var(--muted);font-weight:400;white-space:nowrap}.xlsx-table{border-collapse:separate;border-spacing:0;width:max-content;min-width:100%;table-layout:auto;font-size:11px}.xlsx-table th,.xlsx-table td{border-right:1px solid #e2eaed;border-bottom:1px solid #e2eaed;padding:6px 8px;text-align:left;vertical-align:top;white-space:pre-wrap;word-break:normal;overflow-wrap:anywhere;min-width:112px;max-width:320px;line-height:1.45}.xlsx-table tr:first-child th,.xlsx-table tr:first-child td{border-top:1px solid #e2eaed}.xlsx-table th:first-child,.xlsx-table td:first-child{border-left:1px solid #e2eaed}.xlsx-table th:first-child{position:sticky;left:0;z-index:2;width:42px;min-width:42px;max-width:42px;background:#f4f7f8;color:var(--muted);font-weight:500}.xlsx-table tr.xlsx-record th{box-shadow:inset 3px 0 0 #7db8ab}.xlsx-note{margin-top:6px;color:var(--muted);font-size:11px}
+    @media(max-width:780px){
+      html,body{height:auto;overflow:auto}
+      .shell,.main{height:auto;min-height:100vh}
+      .container{height:auto;overflow:visible}
+      .work{height:auto;overflow:visible;display:flex;flex-direction:column}
+      .queue{order:0}.evidence{order:1}.detail{order:2}
+      .queue-list{max-height:420px}
+    }
+  </style>
+</head>
+<body>
+<div class="shell">
+  <aside class="side">
+    <div class="brand">ECOPV ORDER OPERATIONS<small>MAIL AUDIT WORKBENCH</small></div>
+    <nav class="nav">
+      <button class="active" data-view="inbox"><i>▦</i>询单复核</button>
+      <button data-view="unfinished"><i>!</i>未完成邮件 <span id="unfinished-nav-count" class="nav-count"></span></button>
+      <button data-view="missing"><i>⚠</i>漏单邮件 <span id="missing-nav-count" class="nav-count"></span></button>
+      <button data-view="filtered"><i>▥</i>已过滤邮件 <span id="filtered-nav-count" class="nav-count"></span></button>
+    </nav>
+    <div class="side-foot">本机工作台<br>自动识别 + 人工确认<br>不会自动提交工单</div>
+  </aside>
+  <main class="main">
+    <header class="top">
+      <div><div class="crumb">邮件处理 / 人工复核工作台 · v2026.09.17</div><h1>询单整理与确认</h1></div>
+      <div class="top-actions"><span class="pill ready">本机数据 · 不对外联网</span><span class="pill confirmed" id="history-state">历史留痕读取中</span><button class="btn" id="refresh">刷新数据</button><button class="btn" id="bulk-filter" disabled>转为已过滤（0）</button><button class="btn primary" id="bulk-confirm" disabled>批量确认（0）</button><button class="btn primary" id="export">导出复核结果</button></div>
+    </header>
+    <div class="container">
+      <div class="banner"><span id="view-banner"><b>工作方式：</b>系统先读取阶段一输出并展示证据，人工确认后才进入后续工单比对。</span><span class="muted" id="source-path"></span></div>
+      <section class="stats" id="stats"></section>
+        <section class="work">
+        <aside class="card queue"><div class="card-head"><h2 id="queue-title">询单队列</h2><span class="muted" id="queue-count"></span></div><div class="queue-tools"><input class="search" id="search" placeholder="模糊搜索主题、公司、发件人…"/><div class="date-tools"><label for="operation-date">处理日期</label><input type="date" id="operation-date"/><button class="btn small" id="clear-operation-date">全部</button></div><div class="filters" id="filters"><button class="on" data-filter="all">全部</button><button data-filter="review">待复核</button><button data-filter="ready">可确认</button><button data-filter="confirmed">已确认</button></div><div class="queue-selectbar" id="queue-selectbar"><button class="btn small" id="select-visible">全选当前列表</button><button class="btn small" id="clear-selected">清除选择</button><span class="selected-count" id="selected-count">已选0封</span></div></div><div class="queue-list" id="queue-list"></div></aside>
+        <section class="card detail" id="detail"></section>
+        <aside class="card evidence" id="evidence"></aside>
+      </section>
+      <div class="footnote">人工确认“整理完成”只表示邮件字段已核对，不等于工单系统已通过审核，也不会自动修改全局代理关系。</div>
+    </div>
+  </main>
+</div>
+<div class="overlay" id="modal-overlay"><div class="modal"><div class="modal-head"><h2 id="modal-title">修正业务明细</h2><button class="btn small" id="modal-close">关闭</button></div><div class="modal-body"><div class="form-grid"><div class="field"><label>客户公司</label><input id="f-company"/></div><div class="field"><label>代理</label><input id="f-agent"/></div><div class="field"><label>国家</label><input id="f-country"/></div><div class="field"><label>服务项目</label><input id="f-program" list="project-options" placeholder="可由项目名称表选择，也可直接输入"/></div><div class="field"><label>需求</label><input id="f-request"/></div><div class="field full"><label id="f-reason-label">修改原因（必填，用于审计）</label><textarea id="f-reason" placeholder="例如：正文明确写的是香港邵光科技有限公司，主题中的名称为打字错误"></textarea></div></div></div><div class="modal-foot"><button class="btn" id="modal-cancel">取消</button><button class="btn primary" id="modal-save">保存人工修正</button></div></div></div>
+<div class="overlay" id="workorder-overlay"><div class="modal"><div class="modal-head"><h2>同步工单核查结果</h2><button class="btn small" id="workorder-close">关闭</button></div><div class="modal-body"><div class="evidence-sub">操作人员在工单系统查完后，在这里记录结果。系统会按邮件、公司、项目和需求身份覆盖旧的漏单结论，并保留操作时间。</div><div class="form-grid"><div class="field"><label>是否已录单</label><select id="wo-found"><option value="是">是，已找到</option><option value="否">否，确认漏单</option><option value="待复核">待复核</option></select></div><div class="field"><label>匹配状态</label><input id="wo-match-status" placeholder="例如：人工确认-已找到"/></div><div class="field"><label>工单编号</label><input id="wo-number"/></div><div class="field"><label>工单日期</label><input id="wo-date" placeholder="YYYY-MM-DD"/></div><div class="field"><label>下单日期</label><input id="wo-placed-date" placeholder="YYYY-MM-DD"/></div><div class="field full"><label>核查备注（必填）</label><textarea id="wo-note" placeholder="例如：在注册工单中按公司、代理、国家和项目查到 1 条"></textarea></div></div></div><div class="modal-foot"><button class="btn" id="workorder-cancel">取消</button><button class="btn primary" id="workorder-save">同步结果</button></div></div></div>
+<div class="toast" id="toast"></div>
+<datalist id="project-options"></datalist>
+<script>
+  const API_BASE=location.protocol==='file:'?'http://127.0.0.1:8765':'';
+  const app={data:null,view:'inbox',filter:'all',search:'',operationDate:'',mailId:null,detailId:null,tab:'details',highlightField:null,detailOrder:{},selectedMailIds:new Set()};
+  const $=s=>document.querySelector(s); const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const statusLabel=s=>({review:'待人工复核',ready:'可确认',confirmed:'已确认',returned:'已退回',needs_info:'待补资料'}[s]||s||'未判定');
+  const statusClass=s=>s||'review';
+  function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600)}
+  async function api(url,opt){const r=await fetch(API_BASE+url,opt);const j=await r.json();if(!j.ok)throw Error(j.error||'操作失败');return j}
+  async function load(){try{app.data=await api('/api/state');render();}catch(e){const hint=location.protocol==='file:'?'请不要直接双击 HTML 文件。先运行项目目录中的“启动人工复核工作台.bat”，或从原 GUI 点击“打开人工复核工作台”。':'请确认工作台服务仍在运行。';$('#detail').innerHTML='<div class="empty">工作台读取失败：'+esc(e.message)+'<br><br>'+esc(hint)+'</div>';toast('无法连接本机工作台服务')}}
+  function allDetails(){return (app.data?.mails||[]).flatMap(m=>m.details.map(d=>({...d,_mail:m})))}
+  function filteredMails(){return app.data?.filtered_mails||[]}
+  function renderBulkButton(){const valid=new Set((app.data?.mails||[]).map(m=>m.id));app.selectedMailIds=new Set([...app.selectedMailIds].filter(id=>valid.has(id)));const n=app.selectedMailIds.size;const b=$('#bulk-confirm');if(b){b.disabled=app.view==='filtered'||n===0;b.textContent=`批量确认（${n}）`}const c=$('#selected-count');if(c)c.textContent=`已选${n}封`;const bar=$('#queue-selectbar');if(bar)bar.style.display=app.view==='filtered'?'none':'flex'}
+  function bindQueueSelection(){document.querySelectorAll('[data-select-mail]').forEach(n=>{n.onclick=e=>e.stopPropagation();n.onchange=e=>{e.stopPropagation();if(n.checked)app.selectedMailIds.add(n.dataset.selectMail);else app.selectedMailIds.delete(n.dataset.selectMail);renderBulkButton()}});renderBulkButton()}
+  function renderStats(){const c=app.data.counts;$('#stats').innerHTML=[['mails','封邮件',''],['details','条业务明细',''],['review','待人工复核','amber'],['confirmed','已确认交接','green'],['filtered','过滤参考','red']].map(x=>`<div class="stat ${x[2]}"><div class="num">${c[x[0]]??0}</div><div class="label">${x[1]}</div></div>`).join('');$('#filtered-nav-count').textContent=filteredMails().length||''}
+  function searchNorm(value){return String(value??'').normalize('NFKC').toLowerCase().replace(/[\s\-_/.,，。:：;；|+()（）【】\[\]{}]+/g,'')}
+  function fuzzyContains(value,query){const text=searchNorm(value),needle=searchNorm(query);if(!needle)return true;if(text.includes(needle))return true;if(needle.length<2)return false;let cursor=0,matched=0;for(const char of needle){const found=text.indexOf(char,cursor);if(found<0)continue;matched++;cursor=found+1}return matched/needle.length>=0.75}
+  function mailOperationDate(m){const dates=[m?.operation_date,...(m?.route_events||[]).map(e=>e?.at),...(m?.details||[]).flatMap(d=>(d?.events||[]).map(e=>e?.at)),m?.date].filter(Boolean).map(v=>String(v).replace('T',' ').slice(0,10));return dates.sort().pop()||''}
+  function matchMail(m){if(app.operationDate&&mailOperationDate(m)!==app.operationDate)return false;const q=app.search.trim();if(!q)return true;const fields=app.view==='filtered'?[m.subject,m.sender,m.recipient,m.date,m.body,m.attachments,m.reason,m.intent_status]:[m.subject,m.sender,m.recipient,m.date,...(m.details||[]).flatMap(d=>[d.fields.company,d.fields.agent,d.fields.program,d.fields.request])];return fields.some(field=>fuzzyContains(field,q))||fuzzyContains(fields.join(''),q)}
+  function renderQueue(){
+    if(app.view==='filtered'){
+      const mails=filteredMails().filter(matchMail);
+      $('#queue-title').textContent='已过滤邮件';$('#queue-count').textContent=mails.length+' 封';
+      $('#filters').style.display='none';
+      $('#queue-list').innerHTML=mails.length?mails.map(m=>`<div class="mail-item filtered-item ${app.mailId===m.id?'active':''}" data-mail="${esc(m.id)}"><div class="mail-line"><input class="mail-select" type="checkbox" data-select-mail="${esc(m.id)}" ${app.selectedMailIds.has(m.id)?'checked':''} aria-label="选择邮件"/><div class="mail-subject">${esc(m.subject||'无主题')}</div></div><div class="mail-meta"><span>${esc(m.sender||'未知发件人')}</span><span>${esc(m.date||'')}</span></div><div class="filter-reason">过滤原因：${esc(m.reason||'未记录')}</div><div style="margin-top:7px;display:flex;justify-content:space-between;align-items:center"><span class="muted">${m.settled?'已定论过滤':'待人工确认'}</span><span class="pill review">已过滤</span></div></div>`).join(''):'<div class="empty">没有符合条件的已过滤邮件</div>';
+      document.querySelectorAll('[data-mail]').forEach(n=>n.onclick=()=>{app.mailId=n.dataset.mail;app.detailId=null;app.tab='raw';render()});
+      bindQueueSelection();
+      return;
+    }
+    const mails=(app.data.mails||[]).filter(m=>app.filter==='all'||m.status===app.filter).filter(matchMail);
+    $('#queue-title').textContent='询单队列';$('#queue-count').textContent=mails.length+' 封';$('#filters').style.display='flex';
+    $('#queue-list').innerHTML=mails.length?mails.map(m=>`<div class="mail-item ${app.mailId===m.id?'active':''}" data-mail="${esc(m.id)}"><div class="mail-line"><input class="mail-select" type="checkbox" data-select-mail="${esc(m.id)}" ${app.selectedMailIds.has(m.id)?'checked':''} aria-label="选择邮件"/><div class="mail-subject">${esc(m.subject||'无主题')}</div></div><div class="mail-meta"><span>${esc(m.sender||'未知发件人')}</span><span>${esc(m.date||'')}</span></div><div style="margin-top:7px;display:flex;justify-content:space-between;align-items:center"><span class="muted">${m.details.length} 条明细</span><span class="pill ${statusClass(m.status)}">${statusLabel(m.status)}</span></div></div>`).join(''):'<div class="empty">没有符合条件的询单</div>';
+    document.querySelectorAll('[data-mail]').forEach(n=>n.onclick=()=>{app.mailId=n.dataset.mail;const m=app.data.mails.find(x=>x.id===app.mailId);app.detailId=m?.details[0]?.id||null;app.tab='details';render()});bindQueueSelection()
+  }
+  function currentMail(){return app.data?.mails.find(m=>m.id===app.mailId)}
+  function currentFiltered(){return filteredMails().find(m=>m.id===app.mailId)}
+  function currentDetail(){const m=currentMail();return m?.details.find(d=>d.id===app.detailId)||m?.details[0]}
+  function renderFilteredDetail(){const m=currentFiltered();if(!m){$('#detail').innerHTML='<div class="empty">请从左侧选择一封已过滤邮件</div>';return}const attachments=(m.attachments||'').split(/[；;]+/).filter(Boolean).map(a=>attachmentChip(m,a)).join('')||'<span class="muted">无附件</span>';$('#detail').innerHTML=`<div class="detail-head"><span class="pill review">已过滤</span><div class="detail-title">${esc(m.subject||'无主题')}</div><div class="detail-meta"><span>发件人：${esc(m.sender||'未知')}</span><span>时间：${esc(m.date||'')}</span><span>来源：阶段一过滤日志</span></div><div class="evidence-sub" style="margin-top:10px">这封邮件已被阶段一规则或意图识别判定为非询单，单独保留用于人工追溯；不会自动进入工单查询。</div></div><div class="steps"><div class="step done">邮件归档</div><div class="step done">附件盘点</div><div class="step done">规则过滤</div><div class="step active">人工查看</div><div class="step">待工单比对</div></div><div class="tabs"><button class="active">邮件原文</button></div><div class="detail-body"><h3 class="section-title">邮件正文摘要</h3><div class="raw">${esc(m.body||'（过滤日志未保存正文摘要）')}</div><h3 class="section-title" style="margin-top:18px">附件清单</h3><div>${attachments}</div></div>`}
+  function attachmentAuditText(a){if(!a?.expected&&!a?.output&&!a?.status)return '';return `附件表格：${esc(a.expected||'—')} 条 / 输出 ${esc(a.output||'—')} 条 · ${esc(a.status||'未校验')}`}
+  function renderDetail(){if(app.view==='filtered'){renderFilteredDetail();return}const m=currentMail(),d=currentDetail();if(!m||!d){$('#detail').innerHTML='<div class="empty">请从左侧选择一封询单</div>';$('#evidence').innerHTML='<div class="empty">等待选择业务明细</div>';return}const steps=d.status==='confirmed'?['done','done','done','done','done']:['done','done','done',d.status==='review'?'active':'done',''];const audit=attachmentAuditText(d.attachment_audit);let body='';if(app.tab==='raw')body=`<h3 class="section-title">邮件正文摘要</h3><div class="raw">${esc(m.body||'（正文摘要为空）')}</div><h3 class="section-title" style="margin-top:18px">附件清单</h3><div>${(m.attachments||'').split(/[；;]+/).filter(Boolean).map(a=>`<span class="attachment">${esc(a)}</span>`).join('')||'<span class="muted">无附件</span>'}</div>`;else if(app.tab==='events')body=`<h3 class="section-title">操作记录</h3>${d.events?.length?d.events.slice().reverse().map(e=>`<div class="event"><b>${esc(e.label)}</b> · ${esc(e.at)}${e.reason?`<br>原因：${esc(e.reason)}`:''}</div>`).join(''):'<div class="empty">当前明细还没有人工操作记录</div>'}`;else body=`<div class="section-title">业务明细 <span class="muted">· 选择一条查看左侧证据</span></div><div class="detail-grid">${m.details.map(x=>{const a=attachmentAuditText(x.attachment_audit);return `<div class="business ${x.id===app.detailId?'selected':''}" data-detail="${esc(x.id)}"><div class="row"><span class="key">代理</span><span class="value">${esc(x.fields.agent||'待人工确认')}</span></div><div class="row"><span class="key">公司</span><span class="value">${esc(x.fields.company||'待确认')}</span></div><div class="row"><span class="key">国家</span><span class="value">${esc(x.fields.country||'待确认')}</span></div><div class="row"><span class="key">项目</span><span class="value">${esc(x.fields.program||'待确认')}</span></div>${a?`<div class="row"><span class="key">附件表</span><span class="value">${a}</span></div>`:''}<div class="card-foot"><span class="pill ${statusClass(x.status)}">${statusLabel(x.status)}</span><span class="muted">${esc(x.confidence)}</span></div></div>`}).join('')}</div>`;$('#detail').innerHTML=`<div class="detail-head"><span class="pill ${statusClass(m.status)}">${statusLabel(m.status)}</span><div class="detail-title">${esc(m.subject||'无主题')}</div><div class="detail-meta"><span>发件人：${esc(m.sender||'未知')}</span><span>时间：${esc(m.date||'')}</span><span>来源：${esc(d.source)}</span></div>${audit?`<div class="evidence-sub" style="margin-top:8px"><b>${audit}</b></div>`:''}${d.review_hint?`<div class="evidence-sub" style="margin-top:8px">人工提示：${esc(d.review_hint)}</div>`:''}<div class="detail-actions"><button class="btn small primary" id="edit">修正当前明细</button><button class="btn small" id="agent">${d.fields.agent?'确认代理归属':'补全代理'}</button><button class="btn small" id="confirm">确认整理完成</button><button class="btn small" id="return">退回复核</button><button class="btn small" id="add-project">＋ 新增项目</button><button class="btn small danger" id="del-project">删除该项目</button></div></div><div class="agent-row"><div><span class="muted">代理归属：</span><strong>${esc(d.fields.agent||'待人工确认')}</strong></div><span class="agent-state">${esc(d.agent_match||'待确认')}</span></div><div class="steps">${['邮件归档','附件盘点','记录展开','人工复核','待工单比对'].map((x,i)=>`<div class="step ${steps[i]}">${x}</div>`).join('')}</div><div class="tabs"><button class="${app.tab==='details'?'active':''}" data-tab="details">业务明细</button><button class="${app.tab==='raw'?'active':''}" data-tab="raw">邮件原文</button><button class="${app.tab==='events'?'active':''}" data-tab="events">操作记录</button></div><div class="detail-body">${body}</div>`;document.querySelectorAll('[data-detail]').forEach(n=>n.onclick=()=>{app.detailId=n.dataset.detail;render()});document.querySelectorAll('[data-tab]').forEach(n=>n.onclick=()=>{app.tab=n.dataset.tab;render()});$('#edit').onclick=()=>openModal(d);$('#agent').onclick=()=>openModal(d,'agent');$('#confirm').onclick=()=>doAction('confirm',{},'人工确认：字段已核对');$('#return').onclick=()=>doAction('return',{},'退回复核：需要人工进一步确认');$('#add-project').onclick=()=>openModal(d,'add');$('#del-project').onclick=()=>deleteProject()}
+  function renderEvidence(){if(app.view==='filtered'){const m=currentFiltered();if(!m){$('#evidence').innerHTML='<div class="empty">选择过滤邮件后显示过滤证据</div>';return}$('#evidence').innerHTML=`<h3>过滤判定证据</h3><div class="evidence-sub">这里展示阶段一为什么没有把该邮件放进询单队列。所有过滤日志都保留，不会因为过滤而丢失。</div><div class="ev-card"><div class="ev-label">过滤原因</div><div class="ev-line"><b>${esc(m.reason||'未记录')}</b></div><span class="source">来源：规则过滤日志</span></div><div class="ev-card"><div class="ev-label">意图识别状态</div><div class="ev-line">${esc(m.intent_status||'未调用或未记录')}</div><div class="ev-line"><span>处理时间：</span>${esc(m.processed_at||'未记录')}</div></div><div class="ev-card"><div class="ev-label">队列归属</div><div class="ev-line">${m.settled?'已定论过滤：默认不进入工单查询':'过滤候选：建议人工确认是否误过滤'}</div></div>`;return}const d=currentDetail();if(!d){$('#evidence').innerHTML='<div class="empty">选择明细后显示证据</div>';return}const s=d.semantic||{};const semanticHtml=s.status?`<div class="ev-card"><div class="ev-label">LLM语义校验 <span class="pill ${s.status==='valid'?'confirmed':'review'}">${esc(s.status)}</span></div><div class="ev-line"><span>问题字段：</span>${esc(s.issues||'无')}</div><div class="ev-line"><span>建议：</span>${esc(s.suggestion||'保留程序原值')}</div><div class="ev-line"><span>理由：</span>${esc(s.reason||'')}</div><span class="source">模型：${esc(s.model||'未记录')}</span></div>`:'';$('#evidence').innerHTML=`<h3>字段证据</h3><div class="evidence-sub">以下内容来自阶段一原始输出。人工接受值会单独保存，并不会覆盖原始邮件或全局规则。</div>${semanticHtml}${d.evidence.map(e=>`<div class="ev-card"><div class="ev-label">${esc(e.label)}</div><div class="ev-line"><span>初始提取：</span>${esc(e.initial||'（空）')}</div><div class="ev-line"><span>当前接受：</span><b>${esc(e.accepted||'（待确认）')}</b></div><span class="source">来源：${esc(e.source)}</span></div>`).join('')}<div class="events"><div class="section-title">最近操作</div>${d.events?.length?d.events.slice(-4).reverse().map(e=>`<div class="event"><b>${esc(e.label)}</b><br>${esc(e.at)}</div>`).join(''):'<div class="muted" style="font-size:12px">暂无人工操作</div>'}</div>`}
+  const _renderEvidenceBase=renderEvidence;renderEvidence=function(){_renderEvidenceBase();if(app.view==='filtered')return;const d=currentDetail(),s=d?.semantic||{};if(!s.status)return;const card=document.querySelector('#evidence .ev-card');if(!card)return;const extra=[s.issue_codes?`<div class="ev-line"><span>问题编号：</span>${esc(s.issue_codes)}</div>`:'',s.evidence?`<div class="ev-line"><span>证据：</span>${esc(s.evidence)}</div>`:'',s.current_values?`<div class="ev-line"><span>当前值：</span>${esc(s.current_values)}</div>`:'',s.suggested_values?`<div class="ev-line"><span>建议值：</span>${esc(s.suggested_values)}</div>`:''].join('');if(extra)card.insertAdjacentHTML('beforeend',extra)}
+  function render(){if(!app.data)return;renderStats();renderProjectOptions();$('#source-path').textContent=app.view==='filtered'?'来源：filtered_mail_record.xlsx':((app.data.paths?.primary||'').split('\\').pop()||'未找到阶段一输出');$('#view-banner').innerHTML=app.view==='filtered'?'<b>工作方式：</b>阶段一读取全量邮件后，将被规则或意图识别过滤的邮件单独保留，供人工追溯。':'<b>工作方式：</b>系统先读取阶段一输出并展示证据，人工确认后才进入后续工单比对。';const source=app.view==='filtered'?filteredMails():(app.data.mails||[]);if(!app.mailId||!source.some(m=>m.id===app.mailId)){app.mailId=source[0]?.id||null;app.detailId=app.view==='filtered'?null:source[0]?.details[0]?.id}renderQueue();renderDetail();renderEvidence()}
+  async function bulkConfirm(){const ids=[...app.selectedMailIds];if(!ids.length||app.view==='filtered')return;if(!confirm(`确定批量确认${ids.length}封邮件吗？仅字段完整且没有待复核明细的邮件会被确认。`))return;try{const j=await api('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'bulk_confirm',mail_ids:ids,reason:'批量人工确认：邮件字段已核对'})});app.selectedMailIds.clear();const skipped=j.skipped_count?`，跳过${j.skipped_count}封未解决邮件`:'';toast(`${j.message}${skipped}`);await load()}catch(e){toast(e.message)}}
+  async function doAction(action,fields={},reason=''){const d=currentDetail();if(!d)return;try{await api('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,record_id:d.id,fields,reason})});toast('操作已保存');await load()}catch(e){toast(e.message)}}
+  async function addProject(fields,note){const m=currentMail();if(!m)return;try{const j=await api('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add_project',mail_id:m.id,mail:{sender:m.sender,recipient:m.recipient,date:m.date,subject:m.subject,body:m.body,attachments:m.attachments},fields,reason:note})});if(j.record_id)app.detailId=j.record_id;toast(j.message+(j.warning?'｜'+j.warning:''));await load()}catch(e){toast(e.message)}}
+  async function deleteProject(){const d=currentDetail();if(!d)return;try{const j=await api('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'delete_project',record_id:d.id})});app.detailId=null;toast(j.message);await load()}catch(e){toast(e.message)}}
+  function renderProjectOptions(){const list=app.data?.projects||[];$('#project-options').innerHTML=list.map(p=>`<option value="${esc(p.name)}">${esc([p.number,p.country,p.business].filter(Boolean).join(' · '))}</option>`).join('')}
+  function openModal(d,mode='edit'){const agentOnly=mode==='agent',adding=mode==='add';$('#modal-title').textContent=adding?'新增项目':(agentOnly?'确认代理归属':'修正业务明细');$('#f-reason-label').textContent=adding?'备注（可选，写入操作记录）':'修改原因（必填，用于审计）';$('#f-reason').placeholder=adding?'例如：正文明确要求新增奥地利电池法和包装法':'例如：正文明确写的是香港邵光科技有限公司，主题中的名称为打字错误';['company','agent','country','program','request'].forEach(k=>$('#f-'+k).value=(adding&&k!=='company'&&k!=='agent')?'':(d.fields[k]||''));$('#f-reason').value='';['company','country','program','request'].forEach(k=>$('#f-'+k).disabled=agentOnly);$('#f-agent').disabled=false;$('#modal-overlay').classList.add('show');$('#modal-save').onclick=async()=>{const reason=$('#f-reason').value.trim();if(!adding&&!reason){toast('请填写修改/确认原因');return}const fields={company:$('#f-company').value,agent:$('#f-agent').value,country:$('#f-country').value,program:$('#f-program').value,request:$('#f-request').value};if(adding){await addProject(fields,reason)}else{await doAction(agentOnly?'agent_confirm':'edit',fields,reason)}$('#modal-overlay').classList.remove('show')}}
+  $('#modal-close').onclick=$('#modal-cancel').onclick=()=>$('#modal-overlay').classList.remove('show');$('#f-program').onchange=e=>{const p=(app.data?.projects||[]).find(x=>x.name===e.target.value.trim());if(p&&p.country)$('#f-country').value=p.country};$('#refresh').onclick=load;$('#bulk-confirm').onclick=bulkConfirm;$('#select-visible').onclick=()=>{if(app.view==='filtered')return;const visible=[...(app.data?.mails||[])].filter(m=>app.filter==='all'||m.status===app.filter).filter(matchMail);visible.forEach(m=>app.selectedMailIds.add(m.id));renderQueue()};$('#clear-selected').onclick=()=>{app.selectedMailIds.clear();renderQueue()};$('#search').oninput=e=>{app.search=e.target.value;renderQueue()};document.querySelectorAll('[data-filter]').forEach(n=>n.onclick=()=>{app.filter=n.dataset.filter;document.querySelectorAll('[data-filter]').forEach(x=>x.classList.toggle('on',x=>x===n));renderQueue()});document.querySelectorAll('[data-view]').forEach(n=>n.onclick=()=>{app.view=n.dataset.view;app.filter='all';app.search='';app.mailId=null;app.detailId=null;app.tab='details';app.selectedMailIds.clear();$('#search').value='';document.querySelectorAll('[data-view]').forEach(x=>x.classList.toggle('active',x===n));document.querySelectorAll('[data-filter]').forEach(x=>x.classList.toggle('on',x.dataset.filter==='all'));render()});$('#export').onclick=async()=>{try{const j=await api('/api/export',{method:'POST'});toast(j.message)}catch(e){toast(e.message)}};
+
+  // 队列视图统一从同一份状态计算：未完成邮件可直接处理，不会复制或丢失原邮件。
+  function queueMails(){
+    if(!app.data)return [];
+    let mails=app.view==='filtered'?filteredMails():(app.view==='missing'?(app.data.missing_mails||[]):(app.data.mails||[]));
+    if(app.view==='unfinished')mails=mails.filter(m=>!mailIsComplete(m));
+    if(app.view==='inbox')mails=mails.filter(m=>app.filter==='all'||m.status===app.filter);
+    return mails.filter(matchMail);
+  }
+  function mailIsComplete(m){const w=m?.workorder_summary||{};return m?.status==='confirmed'||(Number(w.total||0)>0&&Number(w.pending||0)===0)}
+  function mailBusiness(m){const values=[...new Set((m.details||[]).map(d=>d?.fields?.request).filter(Boolean))];return values.join('、')||'待判定'}
+  function decorateQueueCards(){
+    document.querySelectorAll('#queue-list [data-mail]').forEach(node=>{
+      const mail=app.view==='filtered'?filteredMails().find(x=>x.id===node.dataset.mail):(app.data?.mails||[]).find(x=>x.id===node.dataset.mail);
+      if(!mail||node.querySelector('.queue-extra'))return;
+      const extra=document.createElement('div');extra.className='queue-extra';
+      const business=app.view==='filtered'?(mail.intent_status||'已过滤') : mailBusiness(mail);
+      extra.innerHTML=`<span title="${esc(mail.recipient||'未记录')}">收件人：${esc(mail.recipient||'未记录')}</span><span>业务：${esc(business)}</span>`;
+      const meta=node.querySelector('.mail-meta');if(meta)meta.insertAdjacentElement('afterend',extra);
+    });
+  }
+  function decorateDetailMail(m){
+    const meta=$('#detail .detail-meta');
+    if(meta&&!meta.querySelector('[data-recipient]'))meta.insertAdjacentHTML('beforeend',`<span data-recipient>收件人：${esc(m.recipient||'未记录')}</span>`);
+    if(meta&&!meta.querySelector('[data-mail-counts]')&&m.details){
+      const companies=Number(m.company_count||0),projects=Number(m.project_count||0),details=Number(m.detail_count||m.details.length||0);
+      meta.insertAdjacentHTML('beforeend',`<span data-mail-counts>主体数：${companies} · 项目数：${projects} · 明细数：${details}</span>`);
+    }
+    document.querySelectorAll('#detail .business[data-detail]').forEach(card=>{
+      if(card.querySelector('[data-business-type]'))return;
+      const d=(m.details||[]).find(x=>x.id===card.dataset.detail);if(!d)return;
+      const foot=card.querySelector('.card-foot');if(foot)foot.insertAdjacentHTML('beforebegin',`<div class="row" data-business-type><span class="key">具体业务</span><span class="value">${esc(d.fields?.request||'待判定')}</span></div>`);
+      if(d.weee?.enabled&&foot){const w=d.weee.comparison||{};const ws=w.status||'pending';foot.insertAdjacentHTML('beforebegin',`<div class="row" data-weee-row><span class="key">WEEE品类</span><span class="value"><span class="weee-status ${ws}">${weeeStatusText(ws)}</span></span></div>`)}
+    });
+    const w=m.workorder_summary||{};
+    if(Number(w.total||0)>0&&!$('#detail [data-workorder-summary]')){
+      const summary=document.createElement('div');summary.className='evidence-sub';summary.dataset.workorderSummary='true';
+      summary.textContent=`工单核对：已找到 ${Number(w.found||0)} 条；未找到 ${Number(w.missing||0)} 条；待核对 ${Number(w.pending||0)} 条${w.checked_at?`（${w.checked_at}）`:''}`;
+      const actions=$('#detail .detail-actions');if(actions)actions.insertAdjacentElement('afterend',summary);
+    }
+  }
+  function setHistoryState(){
+    const h=app.data?.history||{},node=$('#history-state');if(!node)return;
+    node.classList.remove('ready','confirmed','review');
+    if(h.enabled){node.classList.add('confirmed');node.textContent=`历史留痕已启用 · 已完成${h.completed_count||0} / 未完成${h.unfinished_count||0}`}
+    else{node.classList.add('ready');node.textContent='测试会话 · 不写正式历史'}
+  }
+  renderBulkButton=function(){
+    const valid=new Set(queueMails().map(m=>m.id));
+    app.selectedMailIds=new Set([...app.selectedMailIds].filter(id=>valid.has(id)));
+    const n=app.selectedMailIds.size,isFiltered=app.view==='filtered';
+    const confirmButton=$('#bulk-confirm'),filterButton=$('#bulk-filter');
+    if(confirmButton){confirmButton.disabled=isFiltered||n===0;confirmButton.textContent=`批量确认（${n}）`}
+    if(filterButton){filterButton.disabled=n===0;filterButton.textContent=isFiltered?`转回询单复核（${n}）`:`转为已过滤（${n}）`}
+    const c=$('#selected-count');if(c)c.textContent=`已选${n}封`;
+    const bar=$('#queue-selectbar');if(bar)bar.style.display='flex';
+  };
+  renderStats=function(){
+    const c=app.data?.counts||{},unfinished=(app.data?.mails||[]).filter(m=>!mailIsComplete(m)).length,missing=(app.data?.missing_mails||[]).length;
+    $('#stats').innerHTML=[['mails','封邮件',''],['details','条业务明细',''],['review','待人工复核','amber'],['confirmed','已确认交接','green'],['filtered','过滤参考','red']].map(x=>`<div class="stat ${x[2]}"><div class="num">${c[x[0]]??0}</div><div class="label">${x[1]}</div></div>`).join('');
+    $('#filtered-nav-count').textContent=filteredMails().length||'';
+    $('#unfinished-nav-count').textContent=unfinished||'';
+    $('#missing-nav-count').textContent=missing||'';
+    setHistoryState();
+  };
+  renderQueue=function(){
+    const mails=queueMails(),isFiltered=app.view==='filtered',isUnfinished=app.view==='unfinished',isMissing=app.view==='missing';
+    $('#queue-title').textContent=isFiltered?'已过滤邮件':(isUnfinished?'未完成邮件':(isMissing?'漏单邮件':'询单队列'));
+    $('#queue-count').textContent=mails.length+' 封';
+    $('#filters').style.display=(isFiltered||isUnfinished||isMissing)?'none':'flex';
+    if(isFiltered){
+      $('#queue-list').innerHTML=mails.length?mails.map(m=>`<div class="mail-item filtered-item ${app.mailId===m.id?'active':''}" data-mail="${esc(m.id)}"><div class="mail-line"><input class="mail-select" type="checkbox" data-select-mail="${esc(m.id)}" ${app.selectedMailIds.has(m.id)?'checked':''} aria-label="选择邮件"/><div class="mail-subject">${esc(m.subject||'无主题')}</div></div><div class="mail-meta"><span>${esc(m.sender||'未知发件人')}</span><span>${esc(m.date||'')}</span></div><div class="filter-reason">过滤原因：${esc(m.reason||'未记录')}</div><div style="margin-top:7px;display:flex;justify-content:space-between;align-items:center"><span class="muted">${m.settled?'已定论过滤':'待人工确认'}</span><span class="pill review">已过滤</span></div></div>`).join(''):'<div class="empty">没有符合条件的已过滤邮件</div>';
+      document.querySelectorAll('#queue-list [data-mail]').forEach(n=>n.onclick=()=>{app.mailId=n.dataset.mail;app.detailId=null;app.tab='raw';render()});decorateQueueCards();bindQueueSelection();return;
+    }
+    $('#queue-list').innerHTML=mails.length?mails.map(m=>`<div class="mail-item ${app.mailId===m.id?'active':''}" data-mail="${esc(m.id)}"><div class="mail-line"><input class="mail-select" type="checkbox" data-select-mail="${esc(m.id)}" ${app.selectedMailIds.has(m.id)?'checked':''} aria-label="选择邮件"/><div class="mail-subject">${esc(m.subject||'无主题')}</div></div><div class="mail-meta"><span>${esc(m.sender||'未知发件人')}</span><span>${esc(m.date||'')}</span></div><div style="margin-top:7px;display:flex;justify-content:space-between;align-items:center"><span class="muted">${m.details.length} 条明细</span><span class="pill ${statusClass(m.status)}">${isMissing?'漏单待处理':statusLabel(m.status)}</span></div></div>`).join(''):`<div class="empty">${isUnfinished?'没有待处理邮件':(isMissing?'没有明确漏单':'没有符合条件的询单')}</div>`;
+    document.querySelectorAll('#queue-list [data-mail]').forEach(n=>n.onclick=()=>{app.mailId=n.dataset.mail;const m=(app.data.mails||[]).find(x=>x.id===app.mailId);app.detailId=m?.details[0]?.id||null;app.highlightField=null;app.tab='details';render()});decorateQueueCards();bindQueueSelection();
+  };
+  const legacyRenderDetail=renderDetail;
+  renderDetail=function(){
+    legacyRenderDetail();
+    if(app.view==='filtered'){
+      const m=currentFiltered(),head=$('#detail .detail-head');if(!m||!head)return;decorateDetailMail(m);
+      const note=head.querySelector('.evidence-sub');if(note)note.textContent='该邮件保留在过滤记录中；人工确认后可转入询单复核，不会丢失原始过滤证据。';
+      const actions=document.createElement('div');actions.className='detail-actions';actions.innerHTML='<button class="btn small primary" id="restore-review">转入询单复核</button>';head.appendChild(actions);$('#restore-review').onclick=()=>moveMailToReview(m);return;
+    }
+    const m=currentMail(),actions=$('#detail .detail-actions');if(!m||!actions)return;decorateDetailMail(m);
+    const button=document.createElement('button');button.className='btn small danger';button.id='move-filter';button.textContent='转为已过滤';actions.appendChild(button);button.onclick=()=>moveMailToFiltered(m);
+    if(app.view==='missing'){
+      const sync=document.createElement('button');sync.className='btn small primary';sync.id='sync-workorder';sync.textContent='人工同步工单结果';actions.appendChild(sync);sync.onclick=()=>openWorkorderModal(m,currentDetail());
+      const retry=document.createElement('button');retry.className='btn small';retry.id='retry-workorder';retry.textContent='加入自动重查';actions.appendChild(retry);retry.onclick=()=>queueWorkorderRetry(m,currentDetail());
+    }
+  };
+  const legacyRenderEvidence=renderEvidence;
+  renderEvidence=function(){
+    legacyRenderEvidence();
+    if(app.view!=='filtered')return;
+    const m=currentFiltered(),box=$('#evidence');if(!m||!box)return;
+    const event=(m.route_events||[]).slice(-1)[0];if(event)box.insertAdjacentHTML('beforeend',`<div class="ev-card"><div class="ev-label">最近流转</div><div class="ev-line">${esc(event.label||event.action||'人工操作')}</div><div class="ev-line"><span>时间：</span>${esc(event.at||'未记录')}</div><span class="source">来源：人工流转留痕</span></div>`);
+  };
+  render=function(){
+    if(!app.data)return;renderStats();renderProjectOptions();
+    const history=app.data.history||{},isFiltered=app.view==='filtered',isUnfinished=app.view==='unfinished',isMissing=app.view==='missing';
+    $('#source-path').textContent=isFiltered?'来源：过滤邮件记录':(isMissing?'来源：漏单.xlsx':(isUnfinished?(history.enabled?'按邮件日期持续留痕':'当前会话未完成邮件'):((app.data.paths?.primary||'').split('\\').pop()||'未找到阶段一输出')));
+    $('#view-banner').innerHTML=isFiltered?'<b>已过滤邮件：</b>规则过滤与人工转入的邮件都在这里保留证据，可随时恢复到询单复核。':(isMissing?'<b>漏单邮件：</b>可人工同步工单结果，或加入自动重查队列；结果按邮件身份回流并保留历史。':(isUnfinished?'<b>未完成邮件：</b>按当前处理状态归集；可继续修正、确认或转入已过滤邮件，所有动作均留痕。':'<b>工作方式：</b>系统先读取阶段一输出并展示证据，人工确认后才进入后续工单比对。'));
+    const source=queueMails();if(!app.mailId||!source.some(m=>m.id===app.mailId)){app.mailId=source[0]?.id||null;app.detailId=isFiltered?null:source[0]?.details[0]?.id||null;app.tab=isFiltered?'raw':'details'};
+    renderQueue();renderDetail();renderEvidence();
+  };
+  async function bulkFilter(){
+    const ids=[...app.selectedMailIds];if(!ids.length)return;
+    const restoring=app.view==='filtered';
+    if(!confirm(restoring?`确定将 ${ids.length} 封邮件恢复到询单复核吗？`: `确定将 ${ids.length} 封邮件转为已过滤吗？邮件仍保留在“已过滤邮件”中，可随时恢复。`))return;
+    try{const j=await api('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:restoring?'bulk_restore':'bulk_filter',mail_ids:ids,reason:restoring?'批量人工确认：恢复询单复核':'批量人工确认：不进入询单复核'})});app.selectedMailIds.clear();toast(j.message||(restoring?'已恢复询单复核':'已转为已过滤'));await load()}catch(e){toast(e.message)}
+  }
+  async function moveMailToFiltered(m){
+    const reason=prompt('请填写转为已过滤的原因（将写入操作留痕）：','人工确认：不进入询单复核');if(reason===null)return;
+    try{const j=await api('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'move_to_filtered',mail_id:m.id,reason:reason.trim()||'人工确认：不进入询单复核'})});toast(j.message||'已转为已过滤');await load()}catch(e){toast(e.message)}
+  }
+  async function moveMailToReview(m){
+    const reason=prompt('请填写恢复询单复核的原因（将写入操作留痕）：','人工确认：恢复询单复核');if(reason===null)return;
+    try{const j=await api('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'move_to_review',mail_id:m.id,reason:reason.trim()||'人工确认：恢复询单复核'})});toast(j.message||'已转入询单复核');app.view='inbox';app.mailId=m.id;await load()}catch(e){toast(e.message)}
+  }
+  function openWorkorderModal(m,d){
+    if(!m||!d)return;
+    $('#wo-found').value='是';
+    $('#wo-match-status').value='人工确认-已找到';
+    $('#wo-number').value='';$('#wo-date').value='';$('#wo-placed-date').value='';$('#wo-note').value='';
+    $('#workorder-overlay').classList.add('show');
+    $('#wo-found').onchange=()=>{$('#wo-match-status').value=({'是':'人工确认-已找到','否':'人工确认-漏单','待复核':'人工确认-待复核'}[$('#wo-found').value]||'')};
+    $('#workorder-save').onclick=async()=>{
+      const note=$('#wo-note').value.trim();if(!note){toast('请填写核查备注');return}
+      try{const j=await api('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'manual_workorder_result',mail_id:m.id,record_id:d.id,mail:{sender:m.sender,recipient:m.recipient,date:m.date,subject:m.subject,body:m.body,attachments:m.attachments},fields:d.fields,found:$('#wo-found').value,match_status:$('#wo-match-status').value.trim(),workorder_number:$('#wo-number').value.trim(),workorder_date:$('#wo-date').value.trim(),placed_date:$('#wo-placed-date').value.trim(),note})});$('#workorder-overlay').classList.remove('show');toast(j.message||'工单结果已同步');await load()}catch(e){toast(e.message)}
+    };
+  }
+  async function queueWorkorderRetry(m,d){
+    if(!m||!d)return;
+    const reason=prompt('请填写自动重查原因（将写入操作留痕）：','漏单重新进入工单核查');if(reason===null)return;
+    try{const j=await api('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'queue_workorder_retry',mail_id:m.id,record_id:d.id,mail:{sender:m.sender,recipient:m.recipient,date:m.date,subject:m.subject},fields:d.fields,reason:reason.trim()||'漏单重新进入工单核查'})});toast(j.message||'已加入自动重查队列');await load()}catch(e){toast(e.message)}
+  }
+  $('#workorder-close').onclick=$('#workorder-cancel').onclick=()=>$('#workorder-overlay').classList.remove('show');
+  $('#bulk-confirm').onclick=bulkConfirm;
+  $('#bulk-filter').onclick=bulkFilter;
+  $('#select-visible').onclick=()=>{queueMails().forEach(m=>app.selectedMailIds.add(m.id));renderQueue()};
+  $('#clear-selected').onclick=()=>{app.selectedMailIds.clear();renderQueue()};
+  $('#search').oninput=e=>{app.search=e.target.value;render()};
+  $('#operation-date').onchange=e=>{app.operationDate=e.target.value||'';app.selectedMailIds.clear();render()};
+  $('#clear-operation-date').onclick=()=>{app.operationDate='';$('#operation-date').value='';app.selectedMailIds.clear();render()};
+  document.querySelectorAll('[data-filter]').forEach(n=>n.onclick=()=>{app.filter=n.dataset.filter;document.querySelectorAll('[data-filter]').forEach(x=>x.classList.toggle('on',x===n));render()});
+  document.querySelectorAll('[data-view]').forEach(n=>n.onclick=()=>{app.view=n.dataset.view;app.filter='all';app.search='';app.mailId=null;app.detailId=null;app.highlightField=null;app.tab='details';app.selectedMailIds.clear();$('#search').value='';document.querySelectorAll('[data-view]').forEach(x=>x.classList.toggle('active',x===n));document.querySelectorAll('[data-filter]').forEach(x=>x.classList.toggle('on',x.dataset.filter==='all'));render()});
+
+  // 业务明细卡片可拖动排序；拖动只改变当前工作台的展示顺序，不会篡改
+  // 阶段一原始 Excel。点击字段行则把选中字段同步到左侧证据区。
+  const evidenceFieldMap={代理:'agent',公司:'company',国家:'country',项目:'program',具体业务:'request',附件表:'attachment_record_count'};
+  function selectedFieldValue(d,field){
+    if(!d)return '';
+    if(field==='attachment_record_count'){
+      const a=d.attachment_audit||{};
+      return [a.expected,a.output].filter(Boolean).join(' / ');
+    }
+    return d.fields?.[field]||'';
+  }
+  function evidenceNeedles(field,value){
+    const raw=String(value??'').replace(/&nbsp;/gi,' ').replace(/\s+/g,' ').trim();
+    if(!raw)return [];
+    const values=[raw];
+    // 业务明细里的公司有时仍带案件编号（例如“K-DED0943 RETOTALLY SAS”），
+    // 而附件表只填写法定公司名（“RETOTALLY SAS”）。两者属于同一字段，
+    // 因此保留完整值的同时增加去编号候选；不凭空生成其他公司名称。
+    if(field==='company'){
+      const withoutCode=raw.replace(/^\s*(?:[A-Za-z]{1,4}\s*[-_]\s*)?[A-Za-z]{1,10}\s*[-_]?\d{2,10}\s+/,'').trim();
+      if(withoutCode&&withoutCode!==raw)values.push(withoutCode);
+    }
+    return [...new Set(values)].sort((a,b)=>b.length-a.length);
+  }
+  function escapeRegExp(value){return String(value).replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}
+  function highlightEvidence(value,needle,active){
+    const raw=String(value??'');
+    const needles=(Array.isArray(needle)?needle:[needle]).map(x=>String(x??'').replace(/&nbsp;/gi,' ').replace(/\s+/g,' ').trim()).filter(Boolean).sort((a,b)=>b.length-a.length);
+    if(!active||!needles.length)return esc(raw);
+    const re=new RegExp(needles.map(escapeRegExp).join('|'),'gi');
+    let cursor=0;
+    const marked=raw.replace(re,(match,offset)=>{
+      const before=esc(raw.slice(cursor,offset));
+      cursor=offset+match.length;
+      return before+`<mark class="evidence-hit">${esc(match)}</mark>`;
+    });
+    return marked+esc(raw.slice(cursor));
+  }
+  function attachmentEvidenceFor(m,d){
+    const direct=Array.isArray(d?.attachment_evidence)?d.attachment_evidence:[];
+    if(direct.length)return direct;
+    const merged=[];
+    for(const item of (m?.details||[]))for(const att of (item.attachment_evidence||[])){
+      let target=merged.find(x=>x.filename===att.filename);
+      if(!target){target={filename:att.filename||'附件',records:[],sheets:[],text:att.text||''};merged.push(target)}
+      for(const rec of (att.records||[]))if(!target.records.some(x=>x.sheet_name===rec.sheet_name&&String(x.row_number)===String(rec.row_number)))target.records.push(rec);
+      for(const sheet of (att.sheets||[]))if(!target.sheets.some(x=>x.sheet_name===sheet.sheet_name)){target.sheets.push(sheet)}
+      if(!target.text&&att.text)target.text=att.text;
+    }
+    return merged;
+  }
+  function attachmentChip(m,name,needle='',active=false){
+    const label=String(name||'附件');
+    const text=highlightEvidence(label,needle,active);
+    const files=Array.isArray(m?.attachment_files)?m.attachment_files:[];
+    const file=files.find(item=>String(item?.filename||'').split(/[\\/]/).pop().toLowerCase()===label.split(/[\\/]/).pop().toLowerCase());
+    const params=`mail_id=${encodeURIComponent(m?.id||'')}&name=${encodeURIComponent(label)}${file?.token?`&token=${encodeURIComponent(file.token)}`:''}`;
+    // 原始附件存在时下载原件；旧邮件只有结构化证据时，服务端生成可打开的 xlsx 预览。
+    const canPreview=file||/\.(xlsx?|csv)$/i.test(label)&&attachmentEvidenceFor(m,null).some(item=>String(item.filename||'').toLowerCase()===label.toLowerCase());
+    return canPreview?`<a class="attachment attachment-link" href="/api/attachment?${params}" target="_blank" rel="noopener" title="打开/下载附件">${text}<small>打开/下载</small></a>`:`<span class="attachment">${text}</span>`;
+  }
+  function renderAttachmentEvidence(m,d,field,value){
+    const items=attachmentEvidenceFor(m,d);if(!items.length)return '';
+    const active=Boolean(field&&value);
+    const needles=evidenceNeedles(field,value);
+    return items.map(att=>{
+      const records=Array.isArray(att.records)?att.records:[];
+      const sheets=Array.isArray(att.sheets)?att.sheets:[];
+      const tableHtml=sheets.map(sheet=>{
+        const allRows=Array.isArray(sheet.rows)?sheet.rows:[];
+        // 默认只渲染前 60 行控制表格体积，但当前字段命中的行必须补进来，
+        // 否则公司名称在后面的工作表里时，用户点击后会“找不到证据”。
+        const visibleRows=allRows.slice(0,60);
+        if(active&&needles.length){
+          for(const row of allRows.slice(60)){
+            const cells=(row.cells||[]).map(cell=>String(cell??'')).join(' ');
+            if(needles.some(needle=>cells.toLowerCase().includes(needle.toLowerCase())))visibleRows.push(row);
+          }
+        }
+        const rows=visibleRows.filter((row,index,array)=>array.findIndex(item=>String(item.row_number)===String(row.row_number))===index).sort((a,b)=>allRows.indexOf(a)-allRows.indexOf(b));
+        if(!rows.length)return '';
+        const recordKeys=new Set(records.map(r=>`${r.sheet_name}|${r.row_number}`));
+        return `<div class="xlsx-sheet"><div class="xlsx-sheet-title"><span>工作表：${esc(sheet.sheet_name||'工作表')}</span><span class="xlsx-sheet-hint">${rows.length}${rows.length<allRows.length?' / '+allRows.length:''} 行 · 左右拖动查看</span></div><table class="xlsx-table"><tbody>${rows.map(row=>{const key=`${sheet.sheet_name}|${row.row_number}`,isRecord=recordKeys.has(key);return `<tr class="${isRecord?'xlsx-record':''}"><th>${esc(row.row_number||'')}</th>${(row.cells||[]).map(cell=>`<td>${highlightEvidence(cell,needles,active)}</td>`).join('')}</tr>`}).join('')}</tbody></table></div>`;
+      }).join('');
+      const recordHtml=records.length?`<div class="xlsx-note">当前明细定位：${records.map(r=>`${esc(r.sheet_name||'工作表')} 第${esc(r.row_number||'?')}行`).join('；')}</div>`:'';
+      const textHtml=!tableHtml&&att.text?`<div class="evidence-raw">${highlightEvidence(att.text,value,active)}</div>`:'';
+      const hasHit=active&&tableHtml&&[...tableHtml.matchAll(/class="evidence-hit"/g)].length>0;
+      const locateNote=active&&field==='company'?(hasHit?'<div class="xlsx-note xlsx-hit-note">已定位当前业务明细对应的公司名称</div>':'<div class="xlsx-note">当前公司名称未在此附件表格文本中找到，保留原表内容供人工核对。</div>'):'';
+      return `<div class="ev-card xlsx-preview${hasHit?' xlsx-has-hit':''}"><div class="ev-label"><span>附件内容：${attachmentChip(m,att.filename||'附件',needles,active)}</span><span class="muted">${tableHtml?'表格预览':'文本预览'}</span></div>${tableHtml||textHtml||'<div class="xlsx-note">附件已记录，但暂无可预览内容。</div>'}${locateNote}${recordHtml}<span class="source">来源：附件原始内容（可回溯行）</span></div>`;
+    }).join('');
+  }
+  function applyDetailOrder(m){
+    const grid=document.querySelector('#detail .detail-grid');
+    if(!grid||!m)return;
+    const saved=app.detailOrder[m.id];
+    if(!Array.isArray(saved)||!saved.length)return;
+    const byId=new Map([...grid.children].map(node=>[node.dataset.detail,node]));
+    saved.forEach(id=>{const node=byId.get(id);if(node)grid.appendChild(node)});
+  }
+  function bindDetailInteractions(m){
+    const cards=[...document.querySelectorAll('#detail .business[data-detail]')];
+    if(!cards.length||!m)return;
+    applyDetailOrder(m);
+    document.querySelectorAll('#detail .business[data-detail]').forEach(card=>{
+      card.draggable=true;
+      card.ondragstart=e=>{card.classList.add('dragging');e.dataTransfer.effectAllowed='move';e.dataTransfer.setData('text/plain',card.dataset.detail)};
+      card.ondragend=()=>card.classList.remove('dragging');
+      card.ondragover=e=>{e.preventDefault();e.dataTransfer.dropEffect='move'};
+      card.ondrop=e=>{
+        e.preventDefault();
+        const fromId=e.dataTransfer.getData('text/plain');
+        const from=document.querySelector(`#detail .business[data-detail="${CSS.escape(fromId)}"]`);
+        if(!from||from===card)return;
+        const grid=card.parentElement;
+        const rect=card.getBoundingClientRect();
+        grid.insertBefore(from,e.clientY<rect.top+rect.height/2?card:card.nextSibling);
+        app.detailOrder[m.id]=[...grid.children].map(node=>node.dataset.detail);
+      };
+    });
+    document.querySelectorAll('#detail .business[data-detail] .row').forEach(row=>{
+      const label=row.querySelector('.key')?.textContent.trim()||'';
+      const field=evidenceFieldMap[label];
+      if(!field)return;
+      row.dataset.field=field;
+      row.classList.toggle('field-selected',app.highlightField===field&&row.closest('.business')?.dataset.detail===app.detailId);
+      row.title='点击查看该字段在邮件标题、正文和附件中的证据';
+      row.onclick=e=>{e.stopPropagation();const card=row.closest('.business');app.detailId=card.dataset.detail;app.highlightField=field;renderDetailKeepingScroll()};
+      row.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();row.click()}};
+      row.tabIndex=0;
+      row.setAttribute('role','button');
+    });
+  }
+  // 字段点击会重建业务明细 DOM。重建前保存 detail-body 的滚动位置，
+  // 否则点击第二列/下方公司的字段后，列表会跳回第一条明细。
+  function renderDetailKeepingScroll(){
+    const body=document.querySelector('#detail .detail-body');
+    const top=body?body.scrollTop:0;
+    const left=body?body.scrollLeft:0;
+    render();
+    requestAnimationFrame(()=>{
+      const next=document.querySelector('#detail .detail-body');
+      if(next){next.scrollTop=top;next.scrollLeft=left}
+    });
+  }
+  const _renderDetailWithFields=renderDetail;
+  renderDetail=function(){
+    _renderDetailWithFields();
+    if(app.view!=='filtered')bindDetailInteractions(currentMail());
+  };
+  function weeeStatusText(status){return ({matched:'已匹配',missing:'未找到',pending:'待人工核对'})[status]||status||'待人工核对'}
+  function renderWeeeAudit(d){
+    const w=d?.weee;if(!w?.enabled)return '';
+    const comparison=w.comparison||{},status=comparison.status||((w.status==='已匹配')?'matched':(w.status==='未找到'?'missing':'pending'));
+    const items=Array.isArray(w.items)?w.items:[],checked=Array.isArray(comparison.items)?comparison.items:[];
+    const lines=items.map((item,index)=>{
+      const result=checked[index]||{},brand=item.brand?`${esc(item.brand)} / `:'';
+      const raw=item.category||item.category_original||'未提取';
+      const cls=item.category_class?`第${esc(item.category_class)}类·${esc(item.category_class_name||'')}`:(item.category_class_status==='ambiguous'?'分类表命中多个类别':'分类表未能唯一归类');
+      const itemStatus=result.status||item.category_class_status||'pending';
+      return `<div class="weee-item"><b>${brand}${esc(raw)}</b><span class="muted"> · ${cls}</span><br><span class="weee-status ${itemStatus}">${weeeStatusText(itemStatus)}</span>${result.reason?` <span class="muted">${esc(result.reason)}</span>`:''}</div>`;
+    }).join('');
+    const workorder=(comparison.workorder_categories||[]).map(esc).join('、')||'未读取到注册工单品类明细';
+    return `<div class="weee-audit"><div class="weee-head"><span class="weee-title">德国 WEEE 品类核对</span><span class="weee-status ${status}">${weeeStatusText(status)}</span></div><div class="ev-line"><span>邮件/附件提取：</span>${lines||'未提取到明确品牌与品类'}</div><div class="ev-line" style="margin-top:6px"><span>注册工单品类：</span>${workorder}</div>${comparison.reason||w.reason?`<div class="ev-line" style="margin-top:5px"><span>判断说明：</span>${esc(comparison.reason||w.reason)}</div>`:''}</div>`;
+  }
+  function renderBusinessEvidence(){
+    const m=currentMail(),d=currentDetail(),box=$('#evidence');
+    if(!box)return;
+    if(!m){box.innerHTML='<div class="empty">选择邮件后显示证据</div>';return}
+    const field=app.tab==='details'?app.highlightField:null;
+    const value=selectedFieldValue(d,field);
+    const title=m.subject||'无主题';
+    const body=m.raw_body||m.body||'（正文摘要为空）';
+    const attachments=(m.attachments||'').split(/[；;]+/).map(x=>x.trim()).filter(Boolean);
+    const detailRows=d?[['代理','agent'],['公司','company'],['国家','country'],['项目','program'],['具体业务','request'],['附件表','attachment_record_count']].map(([label,key])=>{const shown=selectedFieldValue(d,key)||'待确认';return `<div class="ev-line"><span>${label}：</span>${key===field?`<b class="evidence-hit">${esc(shown)}</b>`:esc(shown)}</div>`}).join(''):'';
+    const semantic=d?.semantic||{};
+    const semanticHtml=semantic.status?`<div class="ev-card"><div class="ev-label">LLM语义校验 <span class="pill ${semantic.status==='valid'?'confirmed':'review'}">${esc(semantic.status)}</span></div><div class="ev-line"><span>问题字段：</span>${esc(semantic.issues||'无')}</div><div class="ev-line"><span>建议：</span>${esc(semantic.suggestion||'保留程序原值')}</div><div class="ev-line"><span>理由：</span>${esc(semantic.reason||'')}</div></div>`:'';
+    const fieldEvidence=(d?.evidence||[]).map(item=>{
+      const active=item.field===field;
+      return `<div class="ev-card"><div class="ev-label">${esc(item.label)}</div><div class="ev-line"><span>初始提取：</span>${active?highlightEvidence(item.initial,value,true):esc(item.initial||'（空）')}</div><div class="ev-line"><span>当前接受：</span>${active?`<b>${highlightEvidence(item.accepted,value,true)}</b>`:`<b>${esc(item.accepted||'（待确认）')}</b>`}</div><span class="source">来源：${esc(item.source)}</span></div>`;
+    }).join('');
+    const eventHtml=d?.events?.length?d.events.slice(-4).reverse().map(e=>`<div class="event"><b>${esc(e.label)}</b><br>${esc(e.at)}</div>`).join(''):'<div class="muted" style="font-size:12px">暂无人工操作</div>';
+    box.innerHTML=`<h3>字段证据</h3><div class="evidence-sub">点击右侧业务明细字段后，仅标红该字段在标题、正文、附件名称和当前证据中的对应文本；其他字段保持原样。</div><div class="ev-card"><div class="ev-label">邮件标题</div><div class="ev-line">${highlightEvidence(title,value,Boolean(field&&value))}</div><span class="source">来源：邮件主题</span></div><div class="ev-card"><div class="ev-label">邮件原文</div><div class="evidence-raw">${highlightEvidence(body,value,Boolean(field&&value))}</div><span class="source">来源：邮件正文</span></div><div class="ev-card"><div class="ev-label">附件清单</div><div>${attachments.length?attachments.map(name=>attachmentChip(m,name,value,Boolean(field&&value))).join(''):'<span class="muted">无附件</span>'}</div><span class="source">来源：邮件附件名称</span></div>${renderAttachmentEvidence(m,d,field,value)}${d?`<div class="ev-card"><div class="ev-label">当前业务明细${field?` · 已选${esc((d.evidence||[]).find(x=>x.field===field)?.label||field)}`:''}</div>${detailRows}</div>${renderWeeeAudit(d)}`:''}${semanticHtml}${fieldEvidence}<div class="events"><div class="section-title">最近操作</div>${eventHtml}</div>`;
+  }
+  function focusEvidenceHit(){
+    const box=$('#evidence');
+    if(!box||app.tab!=='details'||!app.highlightField)return;
+    const hits=[...box.querySelectorAll('.evidence-hit')];
+    if(!hits.length)return;
+    // 点击“公司”时优先把附件表中的命中单元格滚到中间；
+    // 正文里也有公司名时，不再让正文命中遮住表格证据。
+    const attachmentHits=hits.filter(hit=>hit.closest('.xlsx-preview'));
+    if(app.highlightField==='company'&&attachmentHits.length){
+      attachmentHits[0].scrollIntoView({block:'center',inline:'center'});
+      return;
+    }
+    // 优先定位邮件正文，其次定位附件名称/表格；不要先停在底部的
+    // “当前业务明细”摘要，否则操作人员看不到真正的原始证据。
+    const sourceHit=hits.find(hit=>{
+      const card=hit.closest('.ev-card');
+      const label=card?.querySelector('.ev-label')?.textContent||'';
+      return label.includes('邮件原文')||label.includes('附件清单')||label.includes('附件内容');
+    })||hits[0];
+    sourceHit.scrollIntoView({block:'center',inline:'nearest'});
+  }
+  const _renderEvidenceWithFields=renderEvidence;
+  renderEvidence=function(){
+    if(app.view==='filtered'){_renderEvidenceWithFields();return}
+    renderBusinessEvidence();
+    requestAnimationFrame(focusEvidenceHit);
+  };
+  function enhanceRawAttachmentLinks(){
+    const root=$('#detail');
+    const m=app.view==='filtered'?currentFiltered():currentMail();
+    if(!root||!m)return;
+    root.querySelectorAll('.attachment').forEach(node=>{
+      if(node.closest('a'))return;
+      const label=(node.textContent||'').trim();
+      const files=Array.isArray(m.attachment_files)?m.attachment_files:[];
+      const file=files.find(item=>String(item?.filename||'').split(/[\\/]/).pop().toLowerCase()===label.split(/[\\/]/).pop().toLowerCase());
+      const hasEvidence=/\.(xlsx?|csv)$/i.test(label)&&attachmentEvidenceFor(m,null).some(item=>String(item.filename||'').toLowerCase()===label.toLowerCase());
+      if(!file&&!hasEvidence)return;
+      const link=document.createElement('a');
+      link.className=node.className+' attachment-link';
+      link.target='_blank';link.rel='noopener';link.title='打开/下载附件';
+      link.href=`/api/attachment?mail_id=${encodeURIComponent(m.id||'')}&name=${encodeURIComponent(label)}${file?.token?`&token=${encodeURIComponent(file.token)}`:''}`;
+      link.innerHTML=node.innerHTML+`<small>打开/下载</small>`;
+      node.replaceWith(link);
+    });
+  }
+  const _renderDetailWithAttachmentLinks=renderDetail;
+  renderDetail=function(){_renderDetailWithAttachmentLinks();enhanceRawAttachmentLinks()};
+  load();
+</script>
+</body>
+</html>

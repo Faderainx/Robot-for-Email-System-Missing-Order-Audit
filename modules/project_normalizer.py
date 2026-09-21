@@ -16,6 +16,94 @@ COUNTRIES = [
 # 业务类型
 BUSINESS_TYPES = ["WEEE", "电池法", "包装法", "一次性塑料"]
 
+# 英文国家名 → 中文。离线规则偶尔会产出 "Sweden WEEE" / "Ireland WEEE"
+# 这类英文写法，直接按空格切分会把整串当成国家。
+COUNTRY_ALIASES_EN = {
+    "germany": "德国", "netherlands": "荷兰", "holland": "荷兰",
+    "ireland": "爱尔兰", "italy": "意大利", "belgium": "比利时",
+    "poland": "波兰", "denmark": "丹麦", "france": "法国",
+    "czech": "捷克", "portugal": "葡萄牙", "sweden": "瑞典",
+    "spain": "西班牙", "luxembourg": "卢森堡", "austria": "奥地利",
+    "hungary": "匈牙利", "finland": "芬兰", "romania": "罗马尼亚",
+    "norway": "挪威", "estonia": "爱沙尼亚", "switzerland": "瑞士",
+    "greece": "希腊", "united kingdom": "英国", "canada": "加拿大",
+    "latvia": "拉脱维亚",
+}
+
+
+# 「国家+EPR」统称，例如 "奥地利EPR" / "奥地利 EPR"。
+# EPR 是生产者责任延伸的统称，代理商口语里常拿它代指该国 WEEE/电池法/包装法 三项，
+# 项目名称表里并没有这种名字（表里只有"奥地利WEEE/电池法/包装法"）。
+# 抽取出这种裸统称时，如果同一封邮件里已经有该国的具体项目，它就是冗余行。
+_BARE_EPR_RE = re.compile(r"^\s*([\u4e00-\u9fa5]{2,6})\s*EPR\s*$", re.IGNORECASE)
+
+
+def bare_epr_country(project: str) -> str:
+    """识别「国家+EPR」统称，返回其中的国家；不是统称则返回空串。"""
+    m = _BARE_EPR_RE.match(str(project or "").strip())
+    if not m:
+        return ""
+    country = m.group(1)
+    return country if country in COUNTRIES else ""
+
+
+def prune_umbrella_epr(names: List[str]):
+    """同一封邮件内剔除被同国具体项目覆盖的「国家+EPR」统称行。
+
+    ``names`` 是同一封邮件拆分后的全部项目名。返回 ``(drop_idx, flag_idx)``
+    两个下标集合：
+
+    - ``drop_idx``：该国已有具体项目（如 奥地利WEEE），此统称行冗余，应丢弃；
+    - ``flag_idx``：整封邮件只写了统称、没写任何具体项，保留但需人工确认。
+
+    信息不会丢：只有"同国具体项已存在"时才删；否则保留并标注。
+    """
+    umbrella = {}  # 国家 -> 该项目名的下标列表（同国可能重复出现多次）
+    for i, name in enumerate(names):
+        country = bare_epr_country(name)
+        if country:
+            umbrella.setdefault(country, []).append(i)
+    if not umbrella:
+        return set(), set()
+
+    covered = set()
+    for name in names:
+        if bare_epr_country(name):
+            continue
+        for country in umbrella:
+            if country in str(name):
+                covered.add(country)
+
+    drop_idx, flag_idx = set(), set()
+    for country, idx_list in umbrella.items():
+        target = drop_idx if country in covered else flag_idx
+        target.update(idx_list)
+    return drop_idx, flag_idx
+
+
+def country_of_project(project: str) -> str:
+    """从标准化项目名里取出国家，取不到返回空串。
+
+    项目名的标准写法是「国家+业务」连排或不连排，例如
+    ``奥地利WEEE`` / ``德国 WEEE`` / ``Sweden WEEE``。
+    旧实现按第一个空格切分，遇到无空格写法会把整串当成国家
+    （国家列显示成 "奥地利WEEE"），这里改为按国家名做前缀匹配。
+    """
+    text = (project or "").strip()
+    if not text:
+        return ""
+    for country in sorted(COUNTRIES, key=len, reverse=True):
+        if text.startswith(country):
+            return country
+    for alias in sorted(COUNTRY_ALIASES_EN, key=len, reverse=True):
+        if text.lower().startswith(alias):
+            return COUNTRY_ALIASES_EN[alias]
+    # 国家不在开头（如 "WEEE德国"）时退化为包含匹配
+    for country in sorted(COUNTRIES, key=len, reverse=True):
+        if country in text:
+            return country
+    return ""
+
 # 组合项目映射 (附件四中以11/12/13/14结尾的组合项目)
 COMBO_MAP = {
     "荷兰WEEE+包装法": ["荷兰WEEE", "荷兰包装法"],

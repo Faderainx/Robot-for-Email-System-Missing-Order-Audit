@@ -2,17 +2,19 @@
 
 流程:
   E1 规则提取: 需求(正则) → 代理(邮箱查表) → 客户(主题→正文→附件) → 项目(附件四扫描)
-  E2 LLM 补充: 对规则提取后仍有空字段的邮件, 调 LLM 补充提取
+  E2 LLM 补充: 对规则提取后仍有空字段、或多公司关系待确认的邮件, 调 LLM 补充提取
      - 仅对缺失字段做补充, 不覆盖规则已提取的结果
      - LLM 提取的项目需与附件四做二次匹配标准化
      - LLM 失败 → 保持规则结果, 标记"待确认"
 """
+import json
 import re
 import os
 from typing import List, Dict, Set, Optional
 
 from utils.fuzzy_match import fuzzy_search, fuzzy_match_pair, normalize_text
 from modules.project_normalizer import COUNTRIES
+from modules.weee_category_audit import extract_weee_items
 
 
 class FieldExtractor:
@@ -34,6 +36,10 @@ class FieldExtractor:
         self.project_names = project_names
         self.project_name_list = [p["项目名称"] for p in project_names if p.get("项目名称")]
         self.project_candidates = [(p["项目名称"], p) for p in project_names if p.get("项目名称")]
+        # 邮箱并不是代理唯一标识。真实主题常以“巨齿鲨+客户+项目”或
+        # “美鸥跨境——客户编号+公司”开头，因此预先把附件三中的全称、简称、
+        # 别名建成可审计的主题匹配索引。
+        self._agent_alias_index = self._build_agent_alias_index()
         self.logger = logger
         self.llm_client = llm_client
         self.ocr_fallback = ocr_fallback
@@ -56,23 +62,178 @@ class FieldExtractor:
         # E1a: 提取需求类型
         need = self._extract_need(subject + " " + body)
 
+        # E1a+: 结构化「公司+项目」清单行 (代理群发多公司邮件, 主题/正文逐行声明)
+        groups = self._structured_groups(subject, body)
+
+        # 业务约定：正文是代理/客户实际填写的申请内容，主题可能只是复制标题
+        # 或存在笔误。因此当正文也明确列出公司时，丢弃仅来自主题的同名候选，
+        # 让后续展开优先使用正文中的客户名称。
+        body_company_names = {
+            normalize_text(name) for name in self._company_substrings(body)
+        }
+        if body_company_names and groups:
+            body_groups = [
+                group for group in groups
+                if normalize_text(group.get("customer", "")) in body_company_names
+            ]
+            # 编号批量清单允许品牌名没有“公司/有限公司”后缀；这类组已经
+            # 明确标记为“正文批量清单”，不能因正文候选只抓到其中的法定公司
+            # 就把品牌客户删掉。
+            has_numbered_bulk = any(
+                str(group.get("source", "")).startswith("正文批量清单")
+                for group in groups
+            )
+            if body_groups and not has_numbered_bulk:
+                groups = body_groups
+
         # E1b: 提取代理
         agent_result = self._extract_agent(sender_email, subject, body, attachments)
 
-        # E1c: 提取客户
-        customer_result = self._extract_customer(subject, body, attachments)
+        # E1c: 提取客户 — 结构化行的公司名最可靠
+        if groups and groups[0].get("customer"):
+            customer_result = {
+                "customer": groups[0]["customer"],
+                "source": groups[0]["source"],
+            }
+        else:
+            customer_result = self._extract_customer(subject, body, attachments)
+        customer_result = self._sanitize_customer_result(customer_result)
+
+        # 公司名可能同时出现在主题、正文、附件文件名和附件表格中。单一来源
+        # 抽到的值不应直接覆盖其它来源；先做一次跨来源印证，只有至少两个
+        # 独立来源支持同一主体时才替换一个明显冲突/缺失的候选。多公司结构化
+        # 邮件仍由后面的 groups 保留逐行关系，不在这里压成一个公司。
+        text_company_candidates = {
+            normalize_text(name)
+            for name in (
+                self._company_substrings(subject)
+                + self._company_substrings(body)
+            )
+            if name
+        }
+        # 正文/主题已经明确出现多个主体时，不能把跨来源排序结果压成一个
+        # customer_result；后面的结构化分组/LLM 负责保留公司—项目关系。
+        if len(groups) <= 1 and len(text_company_candidates) <= 1:
+            consensus = self._cross_source_company_consensus(
+                subject, body, attachments
+            )
+            current_customer = str(customer_result.get("customer", "") or "").strip()
+            current_norm = normalize_text(current_customer)
+            consensus_norm = normalize_text(consensus.get("customer", "")) if consensus else ""
+            if consensus and consensus_norm and (
+                not current_norm or current_norm != consensus_norm
+            ):
+                customer_result["customer"] = consensus["customer"]
+                customer_result["source"] = consensus["source"]
+                self._log(
+                    f"公司名跨来源印证: {current_customer or '空'} → "
+                    f"{consensus['customer']} ({consensus['source']})"
+                )
+        customer_result["customer_code"] = self._client_code_near_company(
+            body, customer_result.get("customer", "")
+        ) or self._client_code_near_company(subject, customer_result.get("customer", ""))
 
         # E1d: 提取项目
-        project_result = self._extract_projects(subject, body, attachments)
+        project_result = self._extract_projects(subject, body, attachments, groups)
+
+        # 结构化 Excel 的每一行是业务记录，不是普通的“附件文本”。正文可能只
+        # 罗列其中一部分（例如正文 15 家、xlsx 18 家），此时必须以附件表的
+        # 实际行数展开，不允许正文命中后把附件剩余三行静默丢掉。勾选式 EPR
+        # 表仍以勾选结果决定项目；但若同一附件中存在客户明细表，客户数量及
+        # 每行对应关系必须以该明细表为准，不能因有勾选表而丢失客户行。
+        attachment_groups = self._attachment_structured_groups(
+            attachments, project_result
+        )
+        if attachment_groups:
+            project_result = self._prefer_attachment_record_groups(
+                project_result, attachment_groups
+            )
+
+        # 有些代理邮件正文只写“附件为两家公司”，公司名分别写在多个压缩包文件名中。
+        # 若只取第一个附件公司，会静默漏掉后续客户；在主题/正文没有结构化客户
+        # 关系、且项目已明确时，把每个不同的附件公司展开成独立明细。
+        if not groups and project_result.get("epr_form") is None:
+            attachment_companies = self._attachment_company_names(attachments)
+            # 标题已经给出多个完整主体时，优先使用标题的完整名称。附件文件名
+            # 经常为了简短省略“东莞市虎门”等行政前缀，不能用截短的文件名覆盖
+            # 标题里的法定/个体工商户名称。
+            subject_companies = self._company_substrings(subject)
+            if len(subject_companies) >= 2:
+                attachment_companies = subject_companies
+            attachment_projects = [
+                p.get("standard_name") for p in project_result.get("projects") or []
+                if p.get("standard_name")
+            ]
+            if len(attachment_companies) >= 2 and attachment_projects:
+                groups = [
+                    {
+                        "customer": company,
+                        "source": "附件文件名结构化",
+                        "projects": list(attachment_projects),
+                        "needs_review": False,
+                    }
+                    for company in attachment_companies
+                ]
+                project_result["groups"] = groups
+                self._log(
+                    f"附件文件名识别多家公司: {attachment_companies}，"
+                    f"项目={attachment_projects}"
+                )
+
+        # 规则/附件/LLM 的结构化分组都必须经过同一家公司主体闸门。旧路径
+        # 只清洗了普通 customer_result，直接把 groups[i]["customer"] 写入输出，
+        # 因而“一家公司”这类占位词可能绕过复检；无法证明为公司时保留空值和
+        # 人工复核标记，绝不把占位词写入业务明细。
+        if project_result.get("groups"):
+            project_result["groups"] = self._sanitize_customer_groups(
+                project_result.get("groups") or []
+            )
 
         # E2: LLM 补充提取 — 仅对缺失字段
         llm_used = False
+        llm_attempted = False
+        llm_failure_reason = ""
         missing_agent = not agent_result.get("agent") or agent_result.get("match_method") == "待确认"
         missing_customer = not customer_result.get("customer") or customer_result.get("source") == "待确认"
-        missing_project = not project_result.get("projects")
+        # 有 EPR 申请表勾选结果时, 项目以勾选为唯一权威 —— 不走 LLM / 规则兜底
+        has_epr_form = project_result.get("epr_form") is not None
+        missing_project = not project_result.get("projects") and not has_epr_form
         missing_need = not need
+        coverage_missing = self._project_coverage_gap(subject, body, project_result)
+        if coverage_missing:
+            project_result["need_review"] = True
+            project_result["coverage_missing"] = coverage_missing
+            self._log(
+                f"项目完整性校验发现漏项: {coverage_missing}；转字段复检",
+                "warning",
+            )
 
-        if self.llm_client and self.llm_client.enabled and (missing_agent or missing_customer or missing_project or missing_need):
+        # 多公司邮件是规则层最容易漏掉的场景：规则可能已经找到了一个客户、
+        # 一组项目，但没有建立公司—项目关系。这时字段表面上并不为空，旧逻辑
+        # 因而不会调用 LLM，最终第二家公司会被静默吞掉。仅对“至少两家公司且
+        # 结构化分组缺失/待确认”的邮件启用记录级补充，避免每封普通邮件都增加
+        # 调用成本；有勾选式申请表时仍以勾选结果为唯一权威。
+        all_text = subject + "\n" + body
+        entity_companies = self._company_substrings(all_text)
+        structured_groups = project_result.get("groups") or groups or []
+        multi_entity_hint = (
+            not has_epr_form
+            and len(entity_companies) >= 2
+            and (
+                not structured_groups
+                or any(g.get("needs_review") for g in structured_groups)
+            )
+        )
+
+        # 代理缺失通常只是代理邮箱表不完整，单独为它调用 LLM 成本高且不可靠。
+        # 仅当客户、项目或业务动作确实缺失时才调；若本次已经要调，仍允许 LLM
+        # 顺带补全代理，不覆盖规则结果。
+        requires_llm = (
+            missing_customer or missing_project or missing_need or multi_entity_hint
+            or bool(coverage_missing)
+        )
+        if self.llm_client and self.llm_client.enabled and requires_llm:
+            llm_attempted = True
             self._log(f"规则提取有缺失, 调 LLM 补充: {subject[:40]}")
             llm_result = self.llm_client.extract_fields_llm(subject, body, attachments, sender_email)
             if llm_result:
@@ -82,13 +243,90 @@ class FieldExtractor:
                     agent_result["agent"] = llm_result["代理"]
                     agent_result["match_method"] = "LLM补充"
                 if missing_customer and llm_result.get("客户"):
-                    customer_result["customer"] = llm_result["客户"]
-                    customer_result["source"] = "LLM补充"
+                    llm_customer = self._accept_llm_customer(llm_result.get("客户"))
+                    if llm_customer:
+                        customer_result["customer"] = llm_customer
+                        customer_result["source"] = "LLM补充"
+                    else:
+                        # 模型无法确认时保持空值；后续业务校验会把该行送人工，
+                        # 绝不把职位、注册资本、说明句塞进客户列。
+                        self._log("字段Agent客户候选未通过公司主体闸门，保持空值", "warning")
+                if not customer_result.get("customer_code") and llm_result.get("客户编号"):
+                    customer_result["customer_code"] = str(llm_result["客户编号"]).strip()
                 if missing_need and llm_result.get("需求"):
                     need = llm_result["需求"]
-                if missing_project and llm_result.get("项目"):
+                if (missing_project or coverage_missing) and llm_result.get("项目"):
                     llm_projects = llm_result["项目"]
-                    project_result = self._match_llm_projects(llm_projects)
+                    llm_project_result = self._match_llm_projects(llm_projects)
+                    if missing_project:
+                        project_result = llm_project_result
+                    else:
+                        # 复检只能补漏，不能覆盖规则已经确认的项目。
+                        existing = list(project_result.get("projects") or [])
+                        known = {p.get("standard_name") for p in existing}
+                        for item in llm_project_result.get("projects") or []:
+                            if item.get("standard_name") not in known:
+                                existing.append(item)
+                                known.add(item.get("standard_name"))
+                        project_result["projects"] = existing
+                        groups_for_merge = project_result.get("groups") or []
+                        if len(groups_for_merge) == 1:
+                            group = groups_for_merge[0]
+                            group["projects"] = list(dict.fromkeys(
+                                list(group.get("projects") or [])
+                                + [p.get("standard_name") for p in existing if p.get("standard_name")]
+                            ))
+
+                # 新协议返回“记录”数组。只有多实体提示成立时才用它修复公司—项目
+                # 关系；普通邮件仍完全沿用规则结果，防止 LLM 改写已确认字段。
+                llm_groups = self._llm_record_groups(llm_result.get("记录"))
+                if llm_groups and multi_entity_hint:
+                    current_projects = {
+                        p.get("standard_name") for p in project_result.get("projects") or []
+                        if p.get("standard_name")
+                    }
+                    llm_projects = {
+                        p for g in llm_groups for p in g.get("projects") or []
+                    }
+                    low_confidence = any(
+                        g.get("llm_confidence") not in {"high", "medium"}
+                        for g in llm_groups
+                    )
+                    # 规则已标记“关系待确认”时，只有 LLM 覆盖全部规则项目才
+                    # 允许收窄关系；否则保留规则的交叉展开，保证不漏项目。
+                    complete_mapping = not current_projects or current_projects.issubset(llm_projects)
+                    if complete_mapping:
+                        project_result = {
+                            "projects": [
+                                {"raw_value": p, "standard_name": p}
+                                for g in llm_groups for p in g.get("projects") or []
+                            ],
+                            "epr_form": None,
+                            "need_review": low_confidence,
+                            "groups": llm_groups,
+                        }
+                        self._log(
+                            f"LLM 多公司关联提取: {[(g['customer'], g['projects']) for g in llm_groups]}"
+                        )
+                    else:
+                        project_result["need_review"] = True
+                        self._log("LLM 多公司关联未覆盖全部规则项目，保留规则结果并转人工", "warning")
+            else:
+                # 模型调用失败或输出没有通过 Pydantic 时，绝不使用部分/畸形结果；
+                # 保留规则结果并阻断进入阶段二，交由人工查看原邮件。
+                project_result["need_review"] = True
+                workflow = getattr(self.llm_client, "agent_workflow", None)
+                last = getattr(workflow, "last_result", None)
+                llm_failure_reason = getattr(last, "reason", "") or "模型调用失败或输出结构不合格"
+                self._log(f"字段 LLM 输出未采用，已转人工: {llm_failure_reason}", "warning")
+            customer_result = self._sanitize_customer_result(customer_result)
+
+        # LLM 仅补字段后仍必须重新核对项目覆盖；缺项不能因为模型调用成功
+        # 就被误标为已确认。
+        remaining_coverage_missing = self._project_coverage_gap(subject, body, project_result)
+        if remaining_coverage_missing:
+            project_result["need_review"] = True
+            project_result["coverage_missing"] = remaining_coverage_missing
 
         # E3: OCR 图片兜底 — 常规源(标题/正文/文档附件/文件名)+LLM 全部读完仍缺字段才触发
         # 触发条件只看 客户/项目（OCR 能实际补的字段）; 代理缺失不单独触发
@@ -97,61 +335,395 @@ class FieldExtractor:
         ocr_used = False
         still_missing = (
             not customer_result.get("customer")
-            or not project_result.get("projects")
+            or (not project_result.get("projects") and not has_epr_form)
         )
         if self.ocr_fallback and still_missing:
             ocr_used = self._ocr_fallback(attachments, agent_result, customer_result, project_result)
+        customer_result = self._sanitize_customer_result(customer_result)
+        if not customer_result.get("customer_code"):
+            customer_result["customer_code"] = self._client_code_near_company(
+                body, customer_result.get("customer", "")
+            ) or self._client_code_near_company(subject, customer_result.get("customer", ""))
+
+        # 勾选不完整 / 未勾选 → 强制转人工(不因 OCR 或 LLM 而"猜"出项目)
+        need_review = bool(project_result.get("need_review"))
 
         # 组装输出
         rows = []
-        if project_result["projects"]:
+        row_groups = project_result.get("groups") or []
+        if row_groups:
+            # 结构化清单: 每家公司 × 每个项目 一行
+            for g in row_groups:
+                project_codes = g.get("project_codes") if isinstance(g.get("project_codes"), dict) else {}
+                g_customer = {
+                    "customer": g.get("customer", ""),
+                    "source": g.get("source", "待确认"),
+                    "customer_code": g.get("customer_code", ""),
+                    "attachment_record_source": g.get("attachment_record_source", ""),
+                    "agent": g.get("agent", ""),
+                    "agent_match_method": g.get("agent_match_method", ""),
+                }
+                group_projects = [name for name in g.get("projects") or [] if name]
+                # 附件表已证明该行存在，但项目列无法规范化时也必须保留一条
+                # 占位复核记录；不能因为项目为空把“第 16～18 行”吞掉。
+                if not group_projects:
+                    rows.append(self._build_row(
+                        mail, subject, body, agent_result, g_customer,
+                        None, need, True, llm_used, ocr_used,
+                    ))
+                    continue
+                for proj_name in group_projects:
+                    codes = project_codes.get(proj_name, [])
+                    g_customer["customer_code"] = (
+                        codes[-1] if isinstance(codes, list) and codes else g.get("customer_code", "")
+                    )
+                    proj = {"standard_name": proj_name, "raw_value": proj_name}
+                    rows.append(self._build_row(
+                        mail, subject, body, agent_result, g_customer,
+                        proj, need, need_review, llm_used, ocr_used,
+                    ))
+        elif project_result["projects"]:
             for proj in project_result["projects"]:
-                rows.append({
-                    "sender_email": mail.get("sender_email", ""),
-                    "sender_name": mail.get("sender_name", ""),
-                    "date": mail.get("date"),
-                    "subject": subject,
-                    "body_text": body,
-                    "代理": agent_result["agent"],
-                    "代理匹配方式": agent_result["match_method"],
-                    "客户": customer_result["customer"],
-                    "客户提取来源": customer_result["source"],
-                    "项目": proj["standard_name"],
-                    "项目原始值": proj["raw_value"],
-                    "需求": need,
-                    "置信度": "low" if ocr_used else self._calc_confidence(agent_result, customer_result, proj),
-                    "match_candidates": agent_result.get("candidates", []),
-                    "llm_used": llm_used,
-                    "ocr_used": ocr_used,
-                    "uid": mail.get("uid"),
-                    "filter_status": mail.get("filter_status"),
-                    "filter_reason": mail.get("filter_reason", ""),
-                })
+                rows.append(self._build_row(
+                    mail, subject, body, agent_result, customer_result,
+                    proj, need, need_review, llm_used, ocr_used,
+                ))
         else:
             # 没提取到项目，也要输出一行
-            rows.append({
-                "sender_email": mail.get("sender_email", ""),
-                "sender_name": mail.get("sender_name", ""),
-                "date": mail.get("date"),
-                "subject": subject,
-                "body_text": body,
-                "代理": agent_result["agent"],
-                "代理匹配方式": agent_result["match_method"],
-                "客户": customer_result["customer"],
-                "客户提取来源": customer_result["source"],
-                "项目": "",
-                "项目原始值": "",
-                "需求": need,
-                "置信度": "low",
-                "match_candidates": agent_result.get("candidates", []),
-                "llm_used": llm_used,
-                "ocr_used": ocr_used,
-                "uid": mail.get("uid"),
-                "filter_status": mail.get("filter_status"),
-                "filter_reason": mail.get("filter_reason", ""),
-            })
+            rows.append(self._build_row(
+                mail, subject, body, agent_result, customer_result,
+                None, need, need_review, llm_used, ocr_used,
+            ))
+
+        # 结构化行异常（例如所有行都没有可用项目）不能让上层因 rows[0]
+        # 崩溃，也不能静默丢弃邮件。生成一条明确的人工复核记录。
+        if not rows:
+            self._log("结构化邮件未生成任何字段行，已降级为人工复核记录", "warning")
+            rows.append(self._build_row(
+                mail, subject, body, agent_result, customer_result,
+                None, need, True, llm_used, ocr_used,
+            ))
+
+        # 把“附件表格预期记录数”直接写到每一条结果中，后续 M4 标准化和
+        # 工作台都能复核，而不是只在日志中说“可能少了几条”。
+        expected_count = int(project_result.get("attachment_record_count") or 0)
+        if expected_count:
+            actual_count = len(rows)
+            count_ok = actual_count == expected_count
+            count_message = (
+                f"附件结构化表 {expected_count} 条，输出 {actual_count} 条"
+                + ("，数量一致" if count_ok else "，数量不一致")
+            )
+            if not count_ok:
+                self._log(count_message + "；转人工复核", "warning")
+            for row in rows:
+                row["附件表格记录数"] = expected_count
+                row["附件表格输出数"] = actual_count
+                row["附件表格数量校验"] = "通过" if count_ok else "需人工确认"
+                if not count_ok:
+                    row["置信度"] = "需人工确认"
+                    existing = str(row.get("人工复核提示", "") or "").strip()
+                    row["人工复核提示"] = "；".join(
+                        value for value in (existing, count_message) if value
+                    )
+
+        for row in rows:
+            if llm_attempted and llm_used:
+                row["字段LLM状态"] = "结构校验通过"
+                row["字段LLM失败原因"] = ""
+            elif llm_attempted:
+                row["字段LLM状态"] = "失败，已转人工复核"
+                row["字段LLM失败原因"] = llm_failure_reason
+                row["置信度"] = "需人工确认"
+                existing = str(row.get("人工复核提示", "") or "").strip()
+                hint = f"字段LLM未采用: {llm_failure_reason}"
+                row["人工复核提示"] = "；".join(x for x in (existing, hint) if x)
+            else:
+                row["字段LLM状态"] = "未调用"
+                row["字段LLM失败原因"] = ""
 
         return rows
+
+    def _build_row(self, mail: dict, subject: str, body: str,
+                   agent_result: dict, customer_result: dict,
+                   proj: Optional[dict], need: str,
+                   need_review: bool, llm_used: bool, ocr_used: bool) -> dict:
+        """组装单行输出; proj=None 表示项目缺失的占位行"""
+        row_agent = str(
+            customer_result.get("agent") or agent_result.get("agent") or ""
+        ).strip()
+        row_agent_method = str(
+            customer_result.get("agent_match_method")
+            or agent_result.get("match_method")
+            or "待确认"
+        ).strip()
+        if proj is not None:
+            confidence = "需人工确认" if (need_review or mail.get("filter_status") == "uncertain") else (
+                "low" if ocr_used else self._calc_confidence(agent_result, customer_result, proj)
+            )
+            project = proj["standard_name"]
+            raw_value = proj.get("raw_value", "")
+        else:
+            confidence = "需人工确认" if (need_review or mail.get("filter_status") == "uncertain") else "low"
+            project = ""
+            raw_value = "EPR申请表勾选不完整(见需人工复查)" if need_review else ""
+        # 德国 WEEE 专项：只读取邮件/附件中明确出现的品牌与品类，
+        # 后续阶段二再把这些明细与注册工单的品类明细逐项比对。
+        weee = extract_weee_items(
+            subject=subject,
+            body=mail.get("body_original") or body,
+            attachments=mail.get("attachments") or [],
+            project=project,
+        )
+        weee_items = weee.get("items") or []
+        return {
+            "sender_email": mail.get("sender_email", ""),
+            "sender_name": mail.get("sender_name", ""),
+            "recipient": mail.get("recipient", ""),
+            "date": mail.get("date"),
+            "subject": subject,
+            "body_text": body,
+            # 抽取用 body_text 已去除签名/寒暄；证据区必须保留完整正文。
+            "body_original": (
+                mail.get("body_original")
+                or mail.get("body_raw")
+                or body
+            ),
+            "附件名称": "；".join(
+                str(att.get("filename", "")).strip()
+                for att in (mail.get("attachments") or [])
+                if att.get("filename")
+            ),
+            # 把附件中的可回溯行/工作表快照一起带到阶段一产物。这里使用
+            # 紧凑 JSON，而不是临时文件路径；邮件解析结束后临时 xlsx 会被
+            # 删除，工作台仍能直接展示并高亮本次字段对应的表格行。
+            "附件证据": self._attachment_evidence_json(
+                mail.get("attachments") or [],
+                customer_result.get("attachment_record_source", ""),
+            ),
+            # 只写安全文件名，不写绝对路径。工作台通过同一附件缓存目录
+            # 提供打开/下载；旧邮件没有该列时仍可使用结构化预览。
+            "附件文件索引": self._attachment_file_index_json(mail.get("attachments") or []),
+            "代理": row_agent,
+            "代理匹配方式": row_agent_method,
+            "客户编号": customer_result.get("customer_code", ""),
+            "客户": customer_result["customer"],
+            "客户提取来源": customer_result["source"],
+            "附件明细来源": customer_result.get("attachment_record_source", ""),
+            "项目": project,
+            "项目原始值": raw_value,
+            "需求": need,
+            "德国WEEE专项": "是" if weee.get("enabled") else "否",
+            "德国WEEE品类明细": json.dumps(weee_items, ensure_ascii=False, separators=(",", ":")) if weee.get("enabled") else "",
+            "德国WEEE品类状态": ("待工单品类核对" if weee.get("status") in {"ready", "pending"} else "不适用"),
+            "德国WEEE品类核对": "",
+            "德国WEEE专项说明": "",
+            "置信度": confidence,
+            "match_candidates": agent_result.get("candidates", []),
+            "llm_used": llm_used,
+            "ocr_used": ocr_used,
+            "uid": mail.get("uid"),
+            "filter_status": mail.get("filter_status"),
+            "filter_reason": mail.get("filter_reason", ""),
+        }
+
+    @staticmethod
+    def _attachment_evidence_json(attachments: list, record_source: str = "") -> str:
+        """生成可写入 Excel 的附件证据快照。
+
+        结构化 xlsx 行按当前明细保留，工作台会按同一封邮件合并这些行；
+        非结构化工作表保留有限预览。所有内容均截断，避免超出 Excel 单元格
+        32767 字符上限，也避免把整份大型附件重复写入每一行。
+        """
+        payload = []
+        source_text = str(record_source or "")
+        for attachment in attachments or []:
+            if not isinstance(attachment, dict):
+                continue
+            filename = str(attachment.get("filename") or "").strip()
+            if not filename:
+                continue
+            records = []
+            raw_records = attachment.get("structured_records") or []
+            for record in raw_records:
+                if not isinstance(record, dict):
+                    continue
+                # 附件表格行与当前输出行一一对应时只写这一行；普通明细
+                # 没有定位信息则保留该附件的有限记录，供工作台汇总展示。
+                record_filename = str(record.get("attachment_name") or filename).strip()
+                locator = f"{record_filename} / {str(record.get('sheet_name') or '工作表').strip()} 第{record.get('row_number') or '?'}行"
+                if source_text and locator not in source_text and str(record.get("record_type") or "") != "weee_catalog":
+                    continue
+                records.append({
+                    "attachment_name": record_filename,
+                    "sheet_name": str(record.get("sheet_name") or "工作表"),
+                    "row_number": record.get("row_number") or "?",
+                    "cells": [str(cell)[:240] for cell in (record.get("cells") or [])[:24]],
+                    "raw_text": str(record.get("raw_text") or "")[:1200],
+                    "brand": str(record.get("brand") or "")[:240],
+                    "category": str(record.get("category") or "")[:240],
+                    "record_type": str(record.get("record_type") or "entity"),
+                })
+            sheets = []
+            for sheet in attachment.get("sheets") or []:
+                if not isinstance(sheet, dict):
+                    continue
+                preview_rows = []
+                for row in (sheet.get("preview_rows") or [])[:80]:
+                    if not isinstance(row, dict):
+                        continue
+                    preview_rows.append({
+                        "row_number": row.get("row_number") or "?",
+                        "cells": [str(cell)[:160] for cell in (row.get("cells") or [])[:24]],
+                    })
+                sheets.append({
+                    "sheet_name": str(sheet.get("sheet_name") or "工作表"),
+                    "rows": preview_rows,
+                })
+            text_preview = str(attachment.get("text_content") or "")[:1200]
+            # 仅对 xlsx/结构化附件写表格行；普通附件仍提供文本快照。
+            if records or sheets or text_preview:
+                payload.append({
+                    "filename": filename,
+                    "records": records,
+                    "sheets": sheets,
+                    "text": text_preview,
+                })
+        if not payload:
+            return ""
+        try:
+            encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            return ""
+        return encoded[:30000]
+
+    @staticmethod
+    def _attachment_file_index_json(attachments: list) -> str:
+        """把已持久化附件映射为工作台可用的安全 token。
+
+        文件本体保存在 cache/attachments，Excel 只保存 basename，避免把本机
+        路径暴露到导出文件，也避免 Windows 路径在不同机器上失效。
+        """
+        items = []
+        for attachment in attachments or []:
+            if not isinstance(attachment, dict):
+                continue
+            filename = str(attachment.get("filename") or "").strip()
+            filepath = str(attachment.get("filepath") or "").strip()
+            if not filename or not filepath:
+                continue
+            token = os.path.basename(filepath)
+            if not token or token in {".", ".."}:
+                continue
+            items.append({"filename": filename, "token": token})
+        if not items:
+            return ""
+        try:
+            return json.dumps(items, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            return ""
+
+    def _attachment_structured_groups(self, attachments: list, project_result: dict) -> List[dict]:
+        """把附件 Excel 中的物理数据行转成一行一个业务主体的分组。
+
+        这里不做“18 × 正文 15 项”的笛卡尔积。表格行自带项目时用该项目；
+        表格未写项目而邮件只有一个已确认项目时才安全继承；其余情况保留空项目
+        并转人工复核，仍然保留附件中的每一行。
+        """
+        fallback_projects = list(dict.fromkeys(
+            str(project.get("standard_name", "") or "").strip()
+            for project in project_result.get("projects") or []
+            if str(project.get("standard_name", "") or "").strip()
+        ))
+        groups: List[dict] = []
+        seen_rows = set()
+        for attachment in attachments or []:
+            for record in attachment.get("structured_records") or []:
+                attachment_name = str(
+                    record.get("attachment_name") or attachment.get("filename") or "附件表格"
+                ).strip()
+                # 品牌/品类清单是 WEEE 专项证据，不是一个客户明细；
+                # 不把它展开成空公司工单行，避免破坏原有“附件行数=业务明细数”口径。
+                if str(record.get("record_type") or "") == "weee_catalog" and not str(record.get("customer") or "").strip():
+                    continue
+                sheet_name = str(record.get("sheet_name") or "工作表").strip()
+                row_number = record.get("row_number") or "?"
+                row_key = (attachment_name, sheet_name, str(row_number))
+                if row_key in seen_rows:
+                    continue
+                seen_rows.add(row_key)
+
+                raw_customer = str(record.get("customer") or "").strip()
+                cleaned = self._sanitize_customer_result({
+                    "customer": raw_customer,
+                    "source": "附件表格结构化",
+                }) if raw_customer else {"customer": "", "source": "附件表格结构化"}
+                # 表头已判定为客户列，因此即便是“商贸行/品牌名”这类无公司后缀
+                # 的合法主体也不能被通用公司正则清空；但如果清洗器明确判定
+                # 这是 POA、注册资本、签字时间等表单字段，不能再用 raw_customer
+                # 回填，否则这些标签会重新污染客户字段。
+                customer = cleaned.get("customer", "")
+                raw_project_text = " ".join(
+                    str(record.get(key) or "").strip()
+                    for key in ("project", "country", "business", "request", "raw_text")
+                ).strip()
+                record_projects = self._projects_from_attachment_record(raw_project_text)
+                if not record_projects and len(fallback_projects) == 1:
+                    record_projects = list(fallback_projects)
+
+                source = f"附件表格：{attachment_name} / {sheet_name} 第{row_number}行"
+                attachment_agent = self._canonical_attachment_agent(record.get("agent", ""))
+                groups.append({
+                    "customer": customer,
+                    "customer_code": str(record.get("customer_code") or "").strip(),
+                    "agent": attachment_agent,
+                    "agent_match_method": "附件表格代理列" if attachment_agent else "",
+                    "source": "附件表格结构化",
+                    "attachment_record_source": source,
+                    "projects": record_projects,
+                    "needs_review": not bool(customer and record_projects),
+                })
+        return groups
+
+    def _projects_from_attachment_record(self, record_text: str) -> List[str]:
+        """从一条 Excel 明细行取项目；只返回该行能直接支持的项目。"""
+        if not record_text:
+            return []
+        projects = self._drop_generic_epr(
+            self._extract_projects_by_rules(record_text)
+        )
+        found = [
+            str(project.get("standard_name") or "").strip()
+            for project in projects if str(project.get("standard_name") or "").strip()
+        ]
+        # 项目名称表的精确命中补充规则命中，兼容“标准化项目名称”这一列。
+        for name in self.project_name_list:
+            if name and name in record_text and name not in found:
+                found.append(name)
+        return list(dict.fromkeys(found))
+
+    def _prefer_attachment_record_groups(self, project_result: dict, groups: List[dict]) -> dict:
+        """以附件结构化行替换同邮件的正文展开，并保留可审计的数量基线。"""
+        emitted = []
+        for group in groups:
+            emitted.extend(str(name) for name in group.get("projects") or [] if name)
+        # 空项目占位行也要保留，避免被后续“无项目”判断当作附件不存在。
+        result = dict(project_result)
+        result["groups"] = groups
+        result["projects"] = [
+            {"raw_value": name, "standard_name": name}
+            for name in dict.fromkeys(emitted)
+        ] or list(project_result.get("projects") or [])
+        result["attachment_record_count"] = len(groups)
+        result["need_review"] = bool(result.get("need_review")) or any(
+            group.get("needs_review") for group in groups
+        )
+        self._log(
+            f"附件结构化表优先: {len(groups)} 条记录，"
+            f"来源={[group.get('attachment_record_source') for group in groups[:3]]}"
+            + (" …" if len(groups) > 3 else "")
+        )
+        return result
 
     def _ocr_fallback(self, attachments: list, agent_result: dict,
                       customer_result: dict, project_result: dict) -> bool:
@@ -200,7 +772,8 @@ class FieldExtractor:
                     filled = True
 
             # 项目: 附件四标准名 + 离线规则(国家+业务), 多项目收集后由上层拆行
-            if not project_result.get("projects"):
+            # 例外: 已有 EPR 申请表勾选结果时, 勾选是唯一权威, OCR 不得补/改项目
+            if not project_result.get("projects") and not project_result.get("epr_form"):
                 projs = self._extract_projects_by_rules(text)
                 existing = {p["standard_name"] for p in projs}
                 for name in self.project_name_list:
@@ -225,7 +798,9 @@ class FieldExtractor:
             return ""
 
     def _match_llm_projects(self, llm_projects: List[str]) -> dict:
-        """将 LLM 返回的项目名与附件四做匹配标准化"""
+        """将 LLM 返回的项目名与附件四做保守的相似度标准化。"""
+        from rapidfuzz import fuzz
+
         matched = []
         for proj in llm_projects:
             proj_norm = normalize_text(proj)
@@ -237,11 +812,18 @@ class FieldExtractor:
                     best_match = std_name
                     best_score = 100
                     break
+                score = max(
+                    fuzz.ratio(proj_norm, std_norm),
+                    fuzz.partial_ratio(proj_norm, std_norm),
+                )
                 if proj_norm in std_norm or std_norm in proj_norm:
-                    if len(std_name) > (best_score / 2):
-                        best_match = std_name
-                        best_score = len(std_name) * 2
-            if best_match:
+                    score = max(score, 95)
+                if score > best_score:
+                    best_match = std_name
+                    best_score = score
+            # 阈值不足时保留 LLM 原文并交由后续人工/normalizer 判断，不能因为
+            # 名称更长就强行映射到貌似相近的附件四项目。
+            if best_match and best_score >= 88:
                 matched.append({"raw_value": proj, "standard_name": best_match})
             else:
                 matched.append({"raw_value": proj, "standard_name": proj})
@@ -255,6 +837,60 @@ class FieldExtractor:
                 unique.append(p)
         return {"projects": unique}
 
+    def _llm_record_groups(self, records) -> List[dict]:
+        """把 LLM 返回的多公司记录转成阶段一可展开的结构化分组。
+
+        LLM 只能作为规则层的补充，故这里不接受空客户/空项目，也不把一个
+        模糊的自然语言段落直接写入客户列。项目仍经过同一套标准化匹配，避免
+        LLM 返回 ``德国电池``、``Battery DE`` 等非标准写法后造成重复项目。
+        """
+        if not isinstance(records, list):
+            return []
+        grouped = {}
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            customer = str(
+                record.get("客户") or record.get("customer") or
+                record.get("公司") or record.get("company") or ""
+            ).strip()
+            if not customer or len(customer) > 100:
+                continue
+            clean_customer = self._accept_llm_customer(customer)
+            if not clean_customer:
+                continue
+
+            raw_projects = record.get("项目")
+            if raw_projects is None:
+                raw_projects = record.get("projects")
+            if isinstance(raw_projects, str):
+                raw_projects = [p.strip() for p in re.split(r"[+＋/／、，,;；&＆]", raw_projects) if p.strip()]
+            if not isinstance(raw_projects, list):
+                continue
+            raw_projects = [str(p).strip() for p in raw_projects if str(p).strip()]
+            if not raw_projects:
+                continue
+            matched = self._match_llm_projects(raw_projects).get("projects") or []
+            projects = [p["standard_name"] for p in matched if p.get("standard_name")]
+            if not projects:
+                continue
+
+            key = normalize_text(clean_customer)
+            item = grouped.setdefault(key, {
+                "customer": clean_customer,
+                "source": "LLM多公司关联",
+                "projects": [],
+                "llm_confidence": str(record.get("confidence") or "medium").lower(),
+            })
+            confidence = str(record.get("confidence") or "medium").lower()
+            rank = {"low": 0, "medium": 1, "high": 2}
+            if rank.get(confidence, 0) < rank.get(item.get("llm_confidence", "low"), 0):
+                item["llm_confidence"] = confidence
+            for project in projects:
+                if project not in item["projects"]:
+                    item["projects"].append(project)
+        return list(grouped.values())
+
     def _extract_need(self, text: str) -> str:
         """提取需求类型: 注册/新增/撤单"""
         if "撤单" in text:
@@ -265,6 +901,106 @@ class FieldExtractor:
             return "注册"
         return ""
 
+    @staticmethod
+    def _agent_name_from_entry(entry) -> str:
+        if isinstance(entry, dict):
+            return str(entry.get("代理", "") or entry.get("agent", "")).strip()
+        return str(entry or "").strip()
+
+    def _canonical_attachment_agent(self, value: str) -> str:
+        """将附件注册表代理列映射到代理表正式名称。"""
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        folded = normalize_text(raw).casefold()
+        matches = []
+        for alias, officials in self._agent_alias_index.items():
+            if normalize_text(alias).casefold() == folded:
+                matches.extend(officials)
+        matches = list(dict.fromkeys(matches))
+        # 附件列是明确的行级来源；代理表未登记时保留原值，交人工复核。
+        return matches[0] if len(matches) == 1 else raw
+
+    def _build_agent_alias_index(self) -> Dict[str, List[str]]:
+        """建立 代理别名 → 正式代理名 的索引。
+
+        代理表存在“代理”“代理简称”，个别手工表还会有“别名/代理别名”列。
+        这些名称用于主题匹配；输出永远写正式代理名，避免把别名带入工单系统。
+        """
+        index: Dict[str, List[str]] = {}
+        for entry in self.agent_email_map.values():
+            official = self._agent_name_from_entry(entry)
+            if not official:
+                continue
+            aliases = [official]
+            if isinstance(entry, dict):
+                for key in ("代理简称", "别名", "代理别名", "alias", "aliases"):
+                    value = entry.get(key)
+                    if isinstance(value, (list, tuple, set)):
+                        aliases.extend(str(v).strip() for v in value)
+                    elif value:
+                        aliases.extend(
+                            part.strip() for part in re.split(r"[、,，;；/／|]", str(value))
+                        )
+            for alias in aliases:
+                alias = str(alias or "").strip()
+                # 单字中文代理名误命中概率过高；英文单词也至少三位。
+                if len(alias) < 2:
+                    continue
+                bucket = index.setdefault(alias, [])
+                if official not in bucket:
+                    bucket.append(official)
+        return index
+
+    def _extract_agent_from_subject(self, subject: str) -> Optional[dict]:
+        """从主题中的代理全称/简称/别名精确识别代理。
+
+        先匹配分隔符边界，再允许主题首段出现代理前缀（如“美鸥跨境——”）。
+        相同别名指向多个正式代理时不猜测，返回多匹配人工确认。
+        """
+        if not subject or not self._agent_alias_index:
+            return None
+        candidates: List[tuple] = []
+        head = re.sub(r"^\s*(?:re|fw|fwd)\s*[:：-]\s*", "", subject, flags=re.I)
+        head = re.split(r"[+＋—–|]", head, maxsplit=1)[0]
+        for alias, official_names in self._agent_alias_index.items():
+            escaped = re.escape(alias)
+            match = re.search(
+                rf"(?:^|[\s+＋—–_\-:：/／|]){escaped}(?=$|[\s+＋—–_\-:：/／|,，;；(（])",
+                subject,
+                re.I,
+            )
+            position = match.start() if match else -1
+            if position < 0:
+                prefix_position = head.lower().find(alias.lower())
+                if 0 <= prefix_position <= 8:
+                    position = prefix_position
+            if position >= 0:
+                for official in official_names:
+                    candidates.append((position, -len(alias), official, alias))
+        if not candidates:
+            return None
+        candidates.sort()
+        best_position, best_length = candidates[0][0], candidates[0][1]
+        names = []
+        for position, length, official, _ in candidates:
+            if position != best_position or length != best_length:
+                continue
+            if official not in names:
+                names.append(official)
+        if len(names) == 1:
+            return {
+                "agent": names[0],
+                "match_method": "主题代理别名精确匹配",
+                "candidates": [],
+            }
+        return {
+            "agent": " / ".join(names),
+            "match_method": "主题代理别名多匹配-人工排查",
+            "candidates": [{"text": "主题代理别名", "data": {"代理": name}, "score": 100}
+                           for name in names],
+        }
+
     def _extract_agent(
         self, sender_email: str, subject: str, body: str, attachments: list
     ) -> dict:
@@ -273,9 +1009,7 @@ class FieldExtractor:
         逻辑: 精确匹配 → 模糊匹配 → 多匹配展示
         """
         def _get_agent_name(entry):
-            if isinstance(entry, dict):
-                return entry.get("代理", "") or entry.get("agent", "")
-            return str(entry) if entry else ""
+            return self._agent_name_from_entry(entry)
 
         # 精确匹配
         if sender_email in self.agent_email_map:
@@ -285,6 +1019,12 @@ class FieldExtractor:
                 "match_method": "邮箱精确匹配",
                 "candidates": [],
             }
+
+        # 发件邮箱未登记时，主题中的代理全称/简称比模糊邮箱更可靠。
+        # 例如“巨齿鲨+客户公司+比利时包装法”。
+        subject_match = self._extract_agent_from_subject(subject)
+        if subject_match:
+            return subject_match
 
         # 也尝试从正文中提取邮箱地址
         from utils.attachment_parser import extract_emails_from_text
@@ -329,9 +1069,20 @@ class FieldExtractor:
             }
 
         # 多匹配 — 全部展示
+        # 同一个代理常登记多个邮箱，直接 join 会拼出“向善 / 向善”这种重复值，
+        # 会让下游下拉选择和字段比对必然失败；这里按规范化名去重后再拼接。
         self._log(f"代理多匹配({len(candidates)}条): {sender_email}", "warning")
+        seen_agent_names = set()
+        agent_names = []
+        for c in candidates:
+            name = _get_agent_name(c["data"])
+            key = normalize_text(name)
+            if not key or key in seen_agent_names:
+                continue
+            seen_agent_names.add(key)
+            agent_names.append(name)
         return {
-            "agent": " / ".join(_get_agent_name(c["data"]) for c in candidates),
+            "agent": " / ".join(agent_names),
             "match_method": "多匹配-人工排查",
             "candidates": candidates,
         }
@@ -348,17 +1099,17 @@ class FieldExtractor:
     ) -> dict:
         """
         提取客户(公司名称)
-        优先级: 主题 → 正文 → 附件(申请表/文件名)
+        优先级: 正文 → 主题 → 附件(申请表/文件名)
         """
+        # 正文是实际申请内容，优先于可能存在笔误或复制错误的主题。
+        cust = self._extract_company_from_body(body)
+        if cust:
+            return {"customer": cust, "source": "正文"}
+
         # 从主题提取 — 主题格式通常是: 代理+客户号+公司名+项目+注册
         cust = self._extract_company_from_subject(subject)
         if cust:
             return {"customer": cust, "source": "主题"}
-
-        # 从正文提取
-        cust = self._extract_company_from_body(body)
-        if cust:
-            return {"customer": cust, "source": "正文"}
 
         # 从附件提取
         for att in attachments:
@@ -376,22 +1127,295 @@ class FieldExtractor:
 
         return {"customer": "", "source": "待确认"}
 
+    def _cross_source_company_consensus(
+        self, subject: str, body: str, attachments: list
+    ) -> dict:
+        """在主题、正文、附件名称/内容/结构化表格之间做保守的公司名印证。
+
+        这里故意不把“出现次数最多”当成真值：同一正文可能重复复制一段，
+        次数不能替代来源独立性。只有同一候选至少被两个不同来源支持，才允许
+        修正一个冲突的规则候选；单一附件表格行仍可以作为强来源，但不会凭空
+        推断出正文中不存在的其它公司。
+        """
+        source_candidates: Dict[str, List[str]] = {}
+
+        def add_source(source: str, values) -> None:
+            clean: List[str] = []
+            for value in values or []:
+                candidate = self._sanitize_customer_result({
+                    "customer": str(value or ""), "source": source,
+                }).get("customer", "")
+                if not candidate:
+                    continue
+                # 只保留有公司主体证据的候选；表格客户列可以是品牌/商号，
+                # 但不应把表单标签、联系人姓名或数量说明送入印证池。
+                if self._customer_noise_reason(candidate):
+                    continue
+                key = normalize_text(candidate)
+                if key and key not in {normalize_text(v) for v in clean}:
+                    clean.append(candidate)
+            if clean:
+                source_candidates[source] = clean
+
+        subject_candidates = self._company_substrings(subject)
+        loose_subject_company = self._extract_company_from_subject(subject)
+        if loose_subject_company and loose_subject_company not in subject_candidates:
+            subject_candidates.append(loose_subject_company)
+        add_source("主题", subject_candidates)
+        # body_text 已是抽取用正文；body_original 由调用方在需要时保留到证据区，
+        # 这里不把签名/免责声明重新当成公司候选。
+        add_source("正文", self._company_substrings(body))
+
+        attachment_names: List[str] = []
+        attachment_text_candidates: List[str] = []
+        attachment_records: List[str] = []
+        for attachment in attachments or []:
+            filename = str(attachment.get("filename", "") or "").strip()
+            if filename:
+                name = self._extract_company_from_filename(filename)
+                if name:
+                    attachment_names.append(name)
+            text = str(attachment.get("text_content", "") or "")
+            if text:
+                attachment_text_candidates.extend(self._company_substrings(text))
+            for record in attachment.get("structured_records") or []:
+                if isinstance(record, dict) and record.get("customer"):
+                    attachment_records.append(str(record.get("customer")))
+
+        add_source("附件表格", attachment_records)
+        add_source("附件文件名", attachment_names)
+        add_source("附件内容", attachment_text_candidates)
+
+        if not source_candidates:
+            return {}
+
+        support: Dict[str, dict] = {}
+        source_priority = {"附件表格": 4, "附件内容": 3, "正文": 2, "主题": 2, "附件文件名": 1}
+        for source, values in source_candidates.items():
+            for value in values:
+                key = normalize_text(value)
+                if not key:
+                    continue
+                item = support.setdefault(key, {
+                    "customer": value, "sources": set(), "mentions": 0,
+                    "priority": 0,
+                })
+                item["sources"].add(source)
+                item["mentions"] += 1
+                item["priority"] = max(item["priority"], source_priority.get(source, 0))
+
+        if not support:
+            return {}
+        ranked = sorted(
+            support.values(),
+            key=lambda item: (
+                len(item["sources"]), item["priority"], item["mentions"],
+                len(item["customer"]),
+            ),
+            reverse=True,
+        )
+        best = ranked[0]
+        # 多来源共识才有资格纠正冲突值。只有附件表格单独提供时，规则提取
+        # 本来也会优先使用它，不需要在这里重复覆盖。
+        if len(best["sources"]) < 2:
+            return {}
+        source_label = "+".join(
+            source for source in ("附件表格", "附件内容", "正文", "主题", "附件文件名")
+            if source in best["sources"]
+        )
+        return {
+            "customer": best["customer"],
+            "source": f"{source_label}交叉印证",
+            "sources": sorted(best["sources"]),
+        }
+
+    def _sanitize_customer_groups(self, groups: list) -> List[dict]:
+        """清洗结构化公司—项目分组，禁止占位词穿透到业务明细。"""
+        cleaned_groups: List[dict] = []
+        for raw_group in groups or []:
+            if not isinstance(raw_group, dict):
+                continue
+            group = dict(raw_group)
+            result = self._sanitize_customer_result({
+                "customer": group.get("customer", ""),
+                "source": group.get("source", "结构化分组"),
+            })
+            group["customer"] = result.get("customer", "")
+            if result.get("source"):
+                group["source"] = result["source"]
+            if not group["customer"]:
+                group["needs_review"] = True
+            cleaned_groups.append(group)
+        return cleaned_groups
+
+    def _attachment_company_names(self, attachments: list) -> List[str]:
+        """从全部附件文件名提取去重后的公司名，保留出现顺序。"""
+        names: List[str] = []
+        seen = set()
+        for att in attachments or []:
+            candidate = self._extract_company_from_filename(
+                str(att.get("filename", "") or "")
+            )
+            if not candidate:
+                continue
+            key = normalize_text(candidate)
+            if key and key not in seen:
+                seen.add(key)
+                names.append(candidate)
+        return names
+
     def _extract_company_from_subject(self, subject: str) -> str:
-        """从主题中提取公司名"""
+        """从主题中提取公司名。
+        在完整主题上做公司后缀锚定, 取最长合法子串 — 避免把
+        "注销（WEEE+电池）美鸥跨境——EG1970 深圳市博昱网络科技有限公司 德国WEEE"
+        这类主题的流水号/项目前缀一起带出来。"""
         if not subject:
             return ""
+        strict = self._company_substring(subject)
+        if strict:
+            return strict
 
-        # 尝试按常见分隔符切分
-        parts = re.split(r"[+＋\-\|]", subject)
-        for part in parts:
-            part = part.strip()
-            if not part:
-                continue
-            # 公司名特征: 含"公司"或"有限"或"科技"等
-            if any(kw in part for kw in ["公司", "有限", "科技", "电商", "贸易", "实业"]):
-                # 排除代理名
-                if not self._is_agent_name(part):
-                    return part
+        # 主题中的 CHZ482、EG3168、K-DED0943 等是客户/案件编号，不是公司名。
+        # 对没有 SAS/LIMITED/有限公司后缀的英文商号，只在编号后的主题片段中
+        # 读取，并在国家、项目或动作词前截断；不从普通正文自由猜测。
+        code_match = self._CLIENT_CODE_RE.search(subject)
+        if not code_match:
+            return ""
+        tail = subject[code_match.end():].strip(" \t-—_:：+＋")
+        boundary = re.search(
+            r"(?:德国|比利时|比利時|法国|法國|意大利|義大利|西班牙|荷兰|荷蘭|"
+            r"波兰|波蘭|瑞典|爱尔兰|愛爾蘭|葡萄牙|奥地利|奧地利|芬兰|芬蘭|"
+            r"WEEE|EEE|EPR|电池法|電池法|包装法|包裝法|一次性塑料|"
+            r"注册|註冊|新注册|新註冊|申报|申報|注销|註銷|修改|变更|變更)",
+            tail,
+            re.I,
+        )
+        candidate = tail[:boundary.start()] if boundary else tail
+        candidate = candidate.strip(" \t-—_:：+＋,，;；")
+        if len(candidate) < 4 or len(candidate) > 100:
+            return ""
+        if self._customer_noise_reason(candidate) or self._is_agent_name(candidate):
+            return ""
+        if re.fullmatch(r"[A-Za-z]{1,8}[-_]?\d{4,}", candidate):
+            return ""
+        if not re.search(r"[A-Za-z]{2,}|[\u4e00-\u9fff]{2,}", candidate):
+            return ""
+        return candidate
+
+    def _sanitize_customer_result(self, result: dict) -> dict:
+        """去除制表符拼接的标题/表格行，防止它被当作公司名传给阶段二。"""
+        raw = str(result.get("customer", "") or "")
+        noise_reason = self._customer_noise_reason(raw)
+        if noise_reason:
+            self._log(f"客户候选不是公司主体({noise_reason})，转人工补全", "warning")
+            result["customer"] = ""
+            result["source"] = "待确认"
+            return result
+        if not re.search(r"[\t\r\n]", raw):
+            # 结构化表格/LLM 常直接返回一行候选，不能因为没有换行就跳过
+            # 公司前的客户编号清洗。例如 `SED5632 xxxxxxxx B.V.` 的主体是
+            # `xxxxxxxx B.V.`，SED5632 只应记录为客户编号。
+            anchored = self._company_substring(raw)
+            if anchored and normalize_text(anchored) != normalize_text(raw):
+                result["customer"] = anchored
+                result["source"] = f"{result.get('source', '规则')}清洗"
+            else:
+                result["customer"] = raw.strip()
+            return result
+
+        candidates = []
+        for segment in re.split(r"[\t\r\n]+", raw):
+            candidate = self._company_substring(segment.strip())
+            if candidate:
+                candidates.append(candidate)
+        if candidates:
+            result["customer"] = max(candidates, key=len)
+            result["source"] = f"{result.get('source', '规则')}清洗"
+            return result
+
+        self._log("客户候选含制表符但未找到合法公司名，转人工补全", "warning")
+        result["customer"] = ""
+        result["source"] = "待确认"
+        return result
+
+    @staticmethod
+    def _customer_noise_reason(value: str) -> str:
+        """识别明确不是公司主体的字段标签/联系方式/说明文字。
+
+        这是拒绝式闸门：只能拦截确定不是公司名的内容，不能根据常识
+        生成或改写一个公司名。真实公司名无法确认时返回空字符串并交人工。
+        """
+        text = str(value or "").strip()
+        if not text:
+            return "客户为空"
+        compact = re.sub(r"\s+", "", text).lower()
+        hints = (
+            "poa", "legalrepresentative", "legalperson", "legalpositions",
+            "nameoflegalperson", "placeofsignature", "signingtime",
+            "registrationcapital", "companyname", "companyaddress", "companybusiness",
+            "plz", "postcode", "amazonlink", "shoplink", "e-mail", "email", "tel", "phone",
+            "legrepresentativename", "companyregistrationnumber", "registrationnumber", "uscc",
+            "营业执照", "公司名称", "公司地址", "公司注册", "注册资本", "法人",
+            "公司成立日期", "成立日期", "签字", "签署", "职位", "联系信息", "联系人", "联系电话", "邮箱",
+            "邮政编码", "邮编", "地址", "姓名", "身份证", "护照", "性别", "店铺链接",
+            "平台信息", "服务内容", "服务的国家", "销售量", "预计销售", "说明", "备注", "请提供", "请选择", "填写",
+            "非中国公司", "中国公司", "外国公司", "国公司",
+            "不能与其它公司", "不能与其他公司", "与其它公司申请", "与其他公司申请",
+            "foreigncompany", "nonchinesecompany",
+        )
+        if any(hint in compact for hint in hints):
+            return "表单字段标签或说明文字"
+        if "@" in text or re.search(r"https?://|www\.", text, re.I):
+            return "邮箱或链接"
+        if re.fullmatch(r"[+()\-\s\d]{6,}", text):
+            return "联系方式或纯数字"
+        if re.fullmatch(r"[A-Za-z]{1,8}[-_]?\d{4,}", text):
+            return "客户编号或注册号"
+        if re.fullmatch(r"(?:不含|包含|含有|无|有)?回收公司", text):
+            return "业务说明中的通用词"
+        if re.fullmatch(r"[0-9一二三四五六七八九十多几]*\s*家\s*(?:公司|主体|企业)", text, re.I):
+            return "公司数量说明"
+        # “一家公司-德国包装法”“2家公司：…”属于数量/说明，不是公司主体。
+        # 允许后面有项目说明，仍然整体拒绝，避免把数量误当客户名。
+        if re.match(
+            r"^[0-9一二三四五六七八九十多几]+\s*家\s*(?:公司|主体|企业)"
+            r"(?:\s*[-—:：,，/／+＋].*)?$",
+            text,
+            re.I,
+        ):
+            return "公司数量说明"
+        # 申请表常把法人姓名单独列成一行（如 Huiming Wu）。没有公司后缀、
+        # 只有英文姓名结构的候选不能作为客户主体；不确定时留空交人工。
+        if re.fullmatch(r"[A-Z][a-z]{1,24}(?:\s+[A-Z][a-z]{1,24}){1,3}", text):
+            return "疑似法人/联系人姓名"
+        if len(text) > 120:
+            return "说明段落"
+        return ""
+
+    def _accept_llm_customer(self, value: str) -> str:
+        """只接受 LLM 能明确证明为公司主体的候选，不能确认则返回空。"""
+        cleaned = self._sanitize_customer_result({
+            "customer": str(value or ""), "source": "LLM补充"
+        }).get("customer", "")
+        if not cleaned:
+            return ""
+
+        # 公司后缀是最可靠的主体证据；允许中英文、重音字符及括号。
+        anchored = self._company_substring(cleaned)
+        if anchored and normalize_text(anchored) == normalize_text(cleaned):
+            return anchored
+        if re.search(
+            rf"(?:有限责任公司|股份有限公司|集团有限公司|有限公司|责任公司|公司|集团|"
+            rf"（个体工商户）|\(个体工商户\)|经营部|门市部|服务部|商店|商行|工厂|工作室|店|"
+            rf"{self._COMPANY_EN_SUFFIX})\s*$",
+            cleaned,
+            re.I,
+        ):
+            return cleaned
+        # 没有法定后缀时，仅接受明显的中文企业主体词；个人姓名/职位不接受。
+        if re.search(r"(?:科技|贸易|商贸|电商|实业|工业|制造|企业|工厂|商行)$", cleaned):
+            return cleaned
+        self._log("字段Agent返回的客户无法确认是公司主体，已忽略并转人工", "warning")
         return ""
 
     def _extract_company_from_body(self, body: str) -> str:
@@ -405,10 +1429,11 @@ class FieldExtractor:
             if any(kw in line for kw in ["公司", "有限", "科技", "电商", "贸易", "实业"]):
                 # 排除代理名和邮件签名
                 if not self._is_agent_name(line) and len(line) < 50:
-                    # 清理行内多余内容
-                    match = re.search(r"([\u4e00-\u9fa5A-Za-z]+(?:公司|有限[\u4e00-\u9fa5]*公司))", line)
-                    if match:
-                        return match.group(1)
+                    # 清理行内多余内容，并复用统一的拒绝闸门；否则
+                    # “1家公司/不含回收公司”会遮住后面真正的主体名称。
+                    candidate = self._company_substring(line)
+                    if candidate:
+                        return candidate
         return ""
 
     def _extract_company_from_filename(self, filename: str) -> str:
@@ -417,11 +1442,9 @@ class FieldExtractor:
             return ""
         # 去除扩展名
         name = os.path.splitext(filename)[0] if "." in filename else filename
-        if any(kw in name for kw in ["公司", "有限", "科技", "电商", "贸易", "实业"]):
-            match = re.search(r"([\u4e00-\u9fa5A-Za-z]+(?:公司|有限[\u4e00-\u9fa5]*公司))", name)
-            if match:
-                return match.group(1)
-        return ""
+        # 统一走公司后缀解析，支持中文公司名、英文 LLC/LIMITED、
+        # 西语/波兰语等带重音字符的法定后缀。
+        return self._company_substring(name)
 
     def _extract_company_from_attachment_text(self, text: str) -> str:
         """从附件文本中提取公司名"""
@@ -437,41 +1460,585 @@ class FieldExtractor:
             match = re.search(pattern, text)
             if match:
                 name = match.group(1).strip()
-                if any(kw in name for kw in ["公司", "有限", "科技", "电商", "贸易"]):
-                    return name
+                candidate = self._company_substring(name)
+                if candidate:
+                    return candidate
         # 兜底: 无标签的裸公司名（OCR 截图常见, 如订单确认截图里直接印公司名）
         # 取最长匹配（避免截到公司名的前缀子串）
         bare = re.findall(
-            r"[\u4e00-\u9fa5A-Za-z0-9（）()]{2,24}(?:(?:有限|股份)责任?|责任)?公司", text
+            r"[\u4e00-\u9fa5A-Za-z0-9（）()]{2,40}"
+            r"(?:(?:(?:有限|股份)责任?|责任)?公司|（个体工商户）|\(个体工商户\)|"
+            r"经营部|门市部|服务部|商店|商行|工厂|工作室|店)",
+            text,
         )
+        # 排除表单说明文字(如香港公司注册表里的
+        # "適用於只有一名成員而該成員同時亦是唯一董事的私人公司"、
+        # "境外公司需提供注册证书及含法人信息和公司"、"(邮箱只能对应注册一个公司")
+        bare = [b for b in bare if not any(h in b for h in self._DISCLAIMER_HINTS)]
         if bare:
             return max(bare, key=len)
         return ""
 
     def _is_agent_name(self, text: str) -> bool:
         """判断文本是否是代理名(而非公司名)"""
-        agent_names = set()
-        for entry in self.agent_email_map.values():
-            if isinstance(entry, dict):
-                name = entry.get("代理", "") or entry.get("agent", "")
-                if name:
-                    agent_names.add(name)
-                short = entry.get("代理简称", "")
-                if short:
-                    agent_names.add(short)
-            elif isinstance(entry, str):
-                agent_names.add(entry)
-        return text.strip() in agent_names
+        return text.strip() in self._agent_alias_index
 
-    def _extract_projects(self, subject: str, body: str, attachments: list) -> dict:
+    _CLIENT_CODE_RE = re.compile(
+        # 同时覆盖 EG3164、BG1945 和 K-DED0943 这类带前缀的案件编号。
+        r"(?<![A-Za-z0-9])((?:[A-Za-z]{1,3}\s*[-_]\s*)?"
+        r"[A-Za-z]{1,8}\s*[-_]?\s*\d{2,8})(?![A-Za-z0-9])"
+    )
+    _SERVICE_OR_CERT_RE = re.compile(
+        r"(?:WEEE|(?<!W)EEE|电池法|電池法|包装法|包裝法|一次性塑料|EPR)",
+        re.I,
+    )
+
+    @classmethod
+    def _client_codes_in(cls, text: str) -> List[str]:
+        """抽取 EG3164 / BG1945 一类客户或案件编号，保序去重。"""
+        found: List[str] = []
+        for match in cls._CLIENT_CODE_RE.finditer(text or ""):
+            code = re.sub(r"[\s_-]+", "", match.group(1)).upper()
+            if code not in found:
+                found.append(code)
+        return found
+
+    @classmethod
+    def _client_code_near_company(cls, text: str, company: str) -> str:
+        """提取紧邻公司名称前的客户编号，避免把同封另一项目的编号错配。"""
+        if not text or not company:
+            return ""
+        position = text.lower().find(str(company).lower())
+        if position < 0:
+            return ""
+        # 只看公司前的局部窗口，并取最后一个编号：
+        # `德国WEEE EG3164 RONG FANG ...` → EG3164。
+        window = text[max(0, position - 100):position]
+        codes = cls._client_codes_in(window)
+        return codes[-1] if codes else ""
+
+    @classmethod
+    def _strip_company_prefix_noise(cls, candidate: str) -> tuple[str, int, str]:
+        """剥离英文公司候选前的项目/证书类型和客户编号。
+
+        `德国WEEE EG3164 RONG FANG TECHNOLOGY LIMITED` 中，德国WEEE 是
+        项目/证书类型，EG3164 是客户编号，只有 RONG FANG... 才是公司。
+        返回清洗后的名称、相对原候选的起点偏移和识别出的编号。
         """
-        提取项目: 用附件四项目名列表扫描主题/正文/附件
+        raw = str(candidate or "")
+        code_match = cls._CLIENT_CODE_RE.search(raw)
+        if not code_match:
+            return raw.strip(" .,-"), 0, ""
+        prefix = raw[:code_match.start()]
+        # 仅当编号位于候选起始处，或其前方是项目/证书词时才清理；公司名中
+        # 偶然出现的字母数字组合不会被误删。
+        if prefix.strip() and not cls._SERVICE_OR_CERT_RE.search(prefix):
+            # 编号位于候选最前方时，即使前面没有 WEEE/证书词，也要剥离。
+            # 但必须看到一个明确的公司法定后缀，避免误删合法的字母数字公司名。
+            if code_match.start() != 0:
+                return raw.strip(" .,-"), 0, ""
+        remainder = raw[code_match.end():]
+        leading = len(remainder) - len(remainder.lstrip(" \t-—_:："))
+        start = code_match.end() + leading
+        cleaned = remainder.lstrip(" \t-—_:：").strip(" .,-")
+        if not prefix.strip() and not re.search(
+            rf"{cls._COMPANY_EN_SUFFIX}\s*$", cleaned, re.I
+        ):
+            return raw.strip(" .,-"), 0, ""
+        if prefix.strip() and not cls._SERVICE_OR_CERT_RE.search(prefix):
+            if not re.search(rf"{cls._COMPANY_EN_SUFFIX}\s*$", cleaned, re.I):
+                return raw.strip(" .,-"), 0, ""
+        code = re.sub(r"[\s_-]+", "", code_match.group(1)).upper()
+        return cleaned, start, code
+
+    @staticmethod
+    def _split_top_level(text: str, separators: str = "+＋") -> List[str]:
+        """只在括号外分段，保留 `（大型设备+小型设备）` 的内部加号。"""
+        if not text:
+            return []
+        openers = "(（[【"
+        closers = ")）]】"
+        depth = 0
+        current: List[str] = []
+        parts: List[str] = []
+        for char in text:
+            if char in openers:
+                depth += 1
+            elif char in closers and depth:
+                depth -= 1
+            if char in separators and depth == 0:
+                value = "".join(current).strip()
+                if value:
+                    parts.append(value)
+                current = []
+            else:
+                current.append(char)
+        value = "".join(current).strip()
+        if value:
+            parts.append(value)
+        return parts
+
+    def _company_substring(self, text: str) -> str:
+        """从一段文本中提取公司名子串(而非整段)。
+        中文: 后缀锚定(…有限公司/…公司); 英文: 词边界后缀锚定(LTD/GMBH/B.V.…)
+        排除代理名与表单说明文字。"""
+        if not text:
+            return ""
+
+        # 批量清单常以 BG1892、EG3107 等客户编号开头。编号不是公司名；
+        # 题目里还会出现“德国WEEE EG3164 公司”的证书/编号前缀，后续英文
+        # 候选清洗会按实体角色剥离，不再把它们写入客户列。
+        text = re.sub(r"^\s*[A-Za-z]{1,8}[-_]?\d{2,}\s+", "", text)
+
+        def _ok(name: str) -> bool:
+            return (
+                len(name) >= 4
+                and not self._is_agent_name(name)
+                and not any(h in name for h in self._DISCLAIMER_HINTS)
+                and not re.fullmatch(r"[0-9一二三四五六七八九十多几]*\s*家\s*(?:公司|主体|企业)", name, re.I)
+                and not re.fullmatch(r"(?:不含|包含|含有|无|有)?回收公司", name)
+            )
+
+        zh = re.findall(
+            r"[\u4e00-\u9fa5A-Za-z0-9·（）()]{2,30}?"
+            r"(?:有限责任公司|股份有限公司|集团有限公司|有限公司|责任公司|公司|"
+            r"经营部|门市部|服务部|商店|商行|工厂|工作室|店)"
+            r"(?:（个体工商户）|\(个体工商户\))?",
+            text,
+        )
+        zh = [c for c in zh if _ok(c)]
+        if zh:
+            return max(zh, key=len)
+
+        m = re.search(
+            rf"([{self._COMPANY_EN_LETTER_CHARS}][{self._COMPANY_EN_CHARS}]{{2,80}}?{self._COMPANY_EN_SUFFIX})"
+            rf"(?![A-Za-z])",
+            text, re.I,
+        )
+        if m:
+            candidate, _, _ = self._strip_company_prefix_noise(m.group(1))
+            if _ok(candidate):
+                return candidate
+        return ""
+
+    def _company_substrings(self, text: str) -> List[str]:
+        """提取一段文本中的全部公司名，保留出现顺序并去除重叠候选。
+
+        ``_company_substring`` 只返回最长的一个，适合单公司主题；批量邮件
+        需要保留 ``公司A、公司B`` 或 ``项目A 公司A & 项目B 公司B`` 的全部
+        客户，不能再用单值接口。
+        """
+        if not text:
+            return []
+
+        text = re.sub(r"^\s*[A-Za-z]{1,8}[-_]?\d{2,}\s+", "", text)
+        matches = []
+        zh_pattern = (
+            r"[\u4e00-\u9fa5A-Za-z0-9·（）()]{2,30}?"
+            r"(?:有限责任公司|股份有限公司|集团有限公司|有限公司|责任公司|公司|"
+            r"经营部|门市部|服务部|商店|商行|工厂|工作室|店)"
+            r"(?:（个体工商户）|\(个体工商户\))?"
+        )
+        for match in re.finditer(zh_pattern, text):
+            value = match.group(0).strip(" ,，;；+＋&＆")
+            if value:
+                matches.append((match.start(), match.end(), value))
+
+        en_pattern = (
+            rf"[{self._COMPANY_EN_LETTER_CHARS}][{self._COMPANY_EN_CHARS}]{{2,80}}?"
+            rf"{self._COMPANY_EN_SUFFIX}(?![A-Za-z])"
+        )
+        for match in re.finditer(en_pattern, text, re.I):
+            raw_value = match.group(1).strip(" .,-") if match.lastindex else match.group(0).strip(" .,-")
+            value, offset, _ = self._strip_company_prefix_noise(raw_value)
+            if value:
+                matches.append((match.start() + offset, match.end(), value))
+
+        # 先按原文位置，再按长度降序；同一位置的短子串被长候选覆盖。
+        matches.sort(key=lambda item: (item[0], -(item[1] - item[0])))
+        selected = []
+        seen = set()
+        for start, end, value in matches:
+            if len(value) < 4 or self._is_agent_name(value):
+                continue
+            if re.fullmatch(r"[0-9一二三四五六七八九十多几]*\s*家\s*(?:公司|主体|企业)", value, re.I):
+                continue
+            if re.fullmatch(r"(?:不含|包含|含有|无|有)?回收公司", value):
+                continue
+            if any(start >= old_start and end <= old_end for old_start, old_end, _ in selected):
+                continue
+            norm = normalize_text(value)
+            if not norm or norm in seen:
+                continue
+            if any(not (end <= old_start or start >= old_end) for old_start, old_end, _ in selected):
+                continue
+            selected.append((start, end, value))
+            seen.add(norm)
+        selected.sort(key=lambda item: item[0])
+        return [value for _, _, value in selected]
+
+    def _structured_groups(self, subject: str, body: str) -> List[dict]:
+        """解析主题/正文中的结构化「公司+项目」清单行。
+
+        覆盖两类高频格式:
+          1) 代理群发邮件正文逐行列出多家公司:
+             "TBA+Health Life Universe Limited+爱尔兰包装法
+              TBA+PLConcepts GmbH & Co KG+爱尔兰包装法 ..."
+          2) 主题式单公司多项目:
+             "上海古道+上海淳祥信息科技有限公司+西班牙包装法+法国包装法+意大利包装法"
+             "美鸥跨境——德国WEEE EG3107 深圳安博时代科技有限公司+德国电池 BG1878 深圳安博..."
+
+        做法: 把文本按 "+" 切段, 逐段识别 公司子串 与 国家×业务组合,
+        组合归属最近的 公司段; 同一公司多条记录合并。
+        返回: [{"customer","source","projects":[标准化项目名]}]; 无结构化记录时返回 []
+        """
+        groups: Dict[str, dict] = {}
+
+        for source, text in (("主题", subject), ("正文", body)):
+            if not text or ("+" not in text and "＋" not in text):
+                continue
+            norm = " ".join(text.split())
+            # `德国WEEE（大型设备+小型设备）` 的括号内加号属于规格，不是
+            # 公司/项目分隔符；只对括号外的 + 做结构化分段。
+            segs = self._split_top_level(norm)
+
+            pending_company = ""
+            pending_projects: List[str] = []
+            pending_project_codes: Dict[str, List[str]] = {}
+            # 连续分段经常写成「荷兰WEEE + 包装法」。后一段没有国家，
+            # 需要继承前一业务段的国家，而不是丢掉包装法。
+            active_country = ""
+            records: List[tuple] = []
+
+            def _flush():
+                nonlocal pending_company, pending_projects, pending_project_codes, active_country
+                if pending_company and pending_projects:
+                    records.append((
+                        pending_company,
+                        list(pending_projects),
+                        {name: list(codes) for name, codes in pending_project_codes.items()},
+                    ))
+                pending_company = ""
+                pending_projects = []
+                pending_project_codes = {}
+                active_country = ""
+
+            for seg in segs:
+                seg = seg.strip()
+                if not seg:
+                    continue
+                combos = [
+                    p["standard_name"] for p in self._extract_projects_by_rules(seg)
+                ]
+                countries = self._country_names_in(seg)
+                if countries:
+                    active_country = countries[-1]
+                elif pending_company and active_country and not combos:
+                    combos = [
+                        p["standard_name"]
+                        for p in self._extract_projects_by_rules(active_country + seg)
+                    ]
+                company = self._company_substring(seg)
+                codes = self._client_codes_in(seg)
+                if company:
+                    # 新公司段: 若当前记录已凑齐(公司+组合)则先落账
+                    if pending_company and pending_projects:
+                        _flush()
+                    pending_company = company
+                    # 段内自含组合 (如 "德国WEEE EG3107 深圳安博时代科技有限公司")
+                    pending_projects = combos
+                    pending_project_codes = {
+                        project: list(codes) for project in combos if codes
+                    }
+                elif combos and pending_company:
+                    for c in combos:
+                        if c not in pending_projects:
+                            pending_projects.append(c)
+                        if codes:
+                            pending_project_codes.setdefault(c, [])
+                            for code in codes:
+                                if code not in pending_project_codes[c]:
+                                    pending_project_codes[c].append(code)
+                # 其他段(代理名/品牌/流水号)忽略
+            _flush()
+
+            for company, projs, project_codes in records:
+                key = company
+                if key in groups:
+                    for p in projs:
+                        if p not in groups[key]["projects"]:
+                            groups[key]["projects"].append(p)
+                    existing_codes = groups[key].setdefault("project_codes", {})
+                    for project, codes in project_codes.items():
+                        bucket = existing_codes.setdefault(project, [])
+                        for code in codes:
+                            if code not in bucket:
+                                bucket.append(code)
+                else:
+                    groups[key] = {
+                        "customer": company,
+                        "source": f"{source}结构化",
+                        "projects": list(projs),
+                        "project_codes": project_codes,
+                    }
+
+        # 另一种真实邮件格式不使用“+”作为行分隔，而是使用制表符、&、
+        # 中文顿号或换行，例如：
+        #   德国电池法 BG2002 公司A & 德国WEEE EG3205 公司A
+        #   公司A、公司B申请注册爱尔兰包装法
+        # 旧逻辑会回退到单客户提取，导致第二家公司消失。这里先按分隔符
+        # 形成局部窗口；若公司与项目无法一一对应，则保守地为每家公司保留
+        # 全部声明项目，并标记需人工确认，优先保证不漏掉客户/项目。
+        for source, text in (("主题", subject), ("正文", body)):
+            if not text:
+                continue
+            delimiters = r"[\r\n\t&＆；;、，,]"
+            if not re.search(delimiters, text):
+                continue
+
+            chunks = [c.strip() for c in re.split(delimiters, text) if c.strip()]
+            if len(chunks) < 2:
+                continue
+
+            all_companies = self._company_substrings(text)
+            global_projects = [
+                p["standard_name"] for p in self._extract_projects_by_rules(text)
+            ]
+            if len(all_companies) < 2 or not global_projects:
+                continue
+
+            local = {}
+            for chunk in chunks:
+                chunk_companies = self._company_substrings(chunk)
+                chunk_projects = [
+                    p["standard_name"] for p in self._extract_projects_by_rules(chunk)
+                ]
+                for company in chunk_companies:
+                    local.setdefault(company, [])
+                    for project in chunk_projects:
+                        if project not in local[company]:
+                            local[company].append(project)
+
+            mapped_companies = set(local)
+            ambiguous = False
+            if not local or mapped_companies != set(all_companies):
+                ambiguous = True
+                for company in all_companies:
+                    local.setdefault(company, list(global_projects))
+            elif len(local) > 1 and any(not projects for projects in local.values()):
+                ambiguous = True
+                for company in local:
+                    if not local[company]:
+                        local[company] = list(global_projects)
+
+            for company, projects in local.items():
+                if not projects:
+                    continue
+                entry = groups.setdefault(
+                    company,
+                    {
+                        "customer": company,
+                        "source": f"{source}结构化",
+                        "projects": [],
+                    },
+                )
+                for project in projects:
+                    if project not in entry["projects"]:
+                        entry["projects"].append(project)
+                if ambiguous:
+                    entry["needs_review"] = True
+                    entry["source"] = f"{source}结构化(公司-项目关联待确认)"
+
+        # 另一类常见群发格式没有“+”分隔符，而是以客户编号逐行列出公司：
+        #   BG1892 甲公司
+        #   BG1893 乙公司
+        # 项目只在主题中声明一次。旧逻辑会回退到普通客户提取，最终只取首家公司。
+        # 仅在主题能唯一确定一个项目、且正文至少有两行编号+公司时启用，避免把
+        # 普通正文中零散提及的多家公司误扩展成多个工单。
+        subject_projects = [
+            p["standard_name"] for p in self._extract_projects_by_rules(subject)
+        ]
+        subject_projects = list(dict.fromkeys(subject_projects))
+        if len(subject_projects) == 1:
+            numbered_companies: List[tuple[str, bool]] = []
+            for line in body.splitlines():
+                line = line.strip()
+                code_match = re.match(r"^[A-Za-z]{1,8}[-_]?\d{2,}\s+(.+?)\s*$", line)
+                if not code_match:
+                    continue
+                company = self._company_substring(line)
+                needs_review = False
+                if not company:
+                    # 编号清单中也会出现品牌名、个体商号等没有 Ltd/公司后缀的名称。
+                    # 在“唯一主题项目 + 至少两条编号行”的严格前提下，保留原名称，
+                    # 但显式标记人工确认，而不是静默漏掉该客户。
+                    tail = code_match.group(1).strip(" ,;，；")
+                    if (
+                        4 <= len(tail) <= 80
+                        and re.fullmatch(r"[A-Za-z0-9 .,&'’()\-]+", tail)
+                    ):
+                        company = tail
+                        needs_review = True
+                if company and company not in {name for name, _ in numbered_companies}:
+                    numbered_companies.append((company, needs_review))
+            if len(numbered_companies) >= 2:
+                return [
+                    {
+                        "customer": company,
+                        "source": "正文批量清单(名称待确认)" if needs_review else "正文批量清单",
+                        "projects": list(subject_projects),
+                        "needs_review": needs_review,
+                    }
+                    for company, needs_review in numbered_companies
+                ]
+        return list(groups.values())
+
+    def _project_coverage_gap(self, subject: str, body: str, project_result: dict) -> List[str]:
+        """检查主题/正文明确声明的项目是否全部进入输出。
+
+        仅比较邮件正文和主题，不把旧式申请表整张国家×业务网格算入，避免
+        附件模板文字造成假漏项。多公司关联不明确时该检查只负责阻止静默漏项，
+        不擅自把项目分配给错误的公司。
+        """
+        if project_result.get("epr_form") is not None:
+            return []
+        declared = {
+            p.get("standard_name")
+            for p in self._drop_generic_epr(
+                self._extract_projects_by_rules(subject + " " + body)
+            )
+            if p.get("standard_name")
+        }
+        emitted = {
+            p.get("standard_name")
+            for p in project_result.get("projects") or []
+            if p.get("standard_name")
+        }
+        for group in project_result.get("groups") or []:
+            emitted.update(str(p) for p in group.get("projects") or [] if p)
+        return sorted(declared - emitted)
+
+    def _extract_projects(self, subject: str, body: str, attachments: list,
+                          groups: List[dict] = None) -> dict:
+        """
+        提取项目。
+
+        优先级 P0 — EPR 申请表勾选 (唯一权威):
+            附件含「可勾选的泛欧 EPR 申请表」时, **只**取客户打勾的
+            国家×业务组合, 其他一律不管 (未勾选的国家不查、也不做文本扫描)。
+            若「国家勾了但业务没勾」「业务勾了但国家没勾」→ need_review=True
+            (置信度落到"需人工确认", 由人工补全, 不静默跳过)。
+
+        回落 P1 — 文本规则 (保持原逻辑):
+            附件没有可勾选申请表(如德国ECOPV服务信息申请表/意大利EPR申请表),
+            仍按 附件四项目名扫描 → 离线"国家+业务"正则 提取, 宁可多提不漏提。
         """
         search_text = subject + " " + body
         for att in attachments:
             search_text += " " + att.get("text_content", "")
             search_text += " " + att.get("filename", "")
 
+        # ---------- P0: EPR 申请表勾选优先 ----------
+        form = self._pick_epr_form(attachments)
+        if form is not None:
+            projects = [
+                {"raw_value": f"申请表勾选: {name}", "standard_name": name}
+                for name in form.get("projects") or []
+            ]
+            # 混合场景: 同封邮件里若还有「旧式(无复选框)申请表」, 用主题做闸门补充。
+            # 旧式表(如 荷兰EPR申请表.xlsx)把整张 国家×业务 网格都印在单元格里,
+            # 直接文本扫描会炸出十几个错误的组合, 故只保留主题中声明过的组合。
+            extras = self._extract_from_plain_attachments(attachments, subject)
+            added = []
+            for e in extras:
+                if e["standard_name"] not in {p["standard_name"] for p in projects}:
+                    projects.append(e)
+                    added.append(e["standard_name"])
+            if added:
+                self._log(f"旧式申请表补充(主题闸门过滤后): {added}")
+
+            incomplete = bool(form.get("unmatched_countries") or form.get("orphan_business"))
+            need_review = incomplete or not projects
+            if projects:
+                self._log(
+                    f"EPR申请表勾选项目: {[p['standard_name'] for p in projects]}"
+                    f" (来源: {form.get('filename', '')})"
+                )
+            if need_review:
+                reason = []
+                if form.get("unmatched_countries"):
+                    reason.append(f"国家已勾选但未勾业务: {form['unmatched_countries']}")
+                if form.get("orphan_business"):
+                    reason.append(f"业务已勾选但未勾国家: {form['orphan_business']}")
+                if not reason:
+                    reason.append("申请表未勾选任何项目")
+                self._log(f"EPR申请表勾选不完整 → 转人工: {'; '.join(reason)}", "warning")
+
+            # 结构化行提供了更可靠的客户名/公司-项目对应关系
+            if groups:
+                if len(groups) == 1 and groups[0]["customer"]:
+                    return {
+                        "projects": projects, "epr_form": form,
+                        "need_review": need_review,
+                        "groups": [{
+                            "customer": groups[0]["customer"],
+                            "source": groups[0]["source"],
+                            "projects": [p["standard_name"] for p in projects],
+                        }],
+                    }
+                # 多家公司的结构化清单比单一勾选表更具体 → 以结构化行为准
+                usable = [g for g in groups if g["projects"]]
+                if usable:
+                    self._log(f"勾选表与结构化行并存, 以结构化行为准: "
+                              f"{[(g['customer'], g['projects']) for g in usable]}")
+                    return {
+                        "projects": [{"raw_value": p, "standard_name": p}
+                                     for g in usable for p in g["projects"]],
+                        "epr_form": form, "need_review": need_review,
+                        "groups": usable,
+                    }
+            return {"projects": projects, "epr_form": form, "need_review": need_review,
+                    "groups": None}
+
+        # ---------- P1: 文本规则(无勾选式申请表) ----------
+
+        # P1a: 结构化「公司+项目」清单行 (代理群发多公司邮件)
+        if groups:
+            declared = self._drop_generic_epr(
+                self._extract_projects_by_rules(subject + " " + body))
+            usable = [g for g in groups if g["projects"]]
+            if len(groups) == 1 and declared:
+                # 单公司主题中常把国家拆成“比利时+波兰+荷兰+丹麦包装法”，
+                # 结构化分段只能在最后一段看到“丹麦包装法”，但全局规则已经
+                # 识别出四个国家。单公司时这些声明项目都属于同一家公司，必须
+                # 合并回分组，不能因 usable 非空而只保留最后一个项目。
+                declared_names = [p["standard_name"] for p in declared]
+                existing_names = list(groups[0].get("projects") or [])
+                groups[0]["projects"] = list(dict.fromkeys(existing_names + declared_names))
+                usable = [groups[0]]
+            if usable:
+                self._log(f"结构化行提取: {[(g['customer'], g['projects']) for g in usable]}")
+                return {
+                    "projects": [{"raw_value": p, "standard_name": p}
+                                 for g in usable for p in g["projects"]],
+                    "epr_form": None,
+                    "need_review": any(g.get("needs_review") for g in usable),
+                    "groups": usable,
+                }
+
+        # P1b: 主题/正文优先闸门
+        #   邮件主题/正文是客户或代理自己写的业务声明, 可靠性远高于附件
+        #   (旧式申请表把整张国家×业务网格印在单元格里, 附件文本扫描必多提)。
+        #   主题+正文能提取到组合时, 附件文本不再参与项目提取。
+        declared = self._extract_projects_by_rules(subject + " " + body)
+        declared = self._drop_generic_epr(declared)
+        if declared:
+            self._log(f"主题/正文声明项目(附件文本不参与): "
+                      f"{[p['standard_name'] for p in declared]}")
+            return {"projects": declared, "epr_form": None, "need_review": False,
+                    "groups": None}
+
+        # P1c: 主题+正文无声明 → 全文扫描(含附件), 宁可多提不漏提
         matched_projects = []
 
         for proj_name in self.project_name_list:
@@ -494,33 +2061,154 @@ class FieldExtractor:
 
         # 附件四未命中（或未导入附件四）→ 离线规则提取: "国家+业务类型" 相邻模式
         if not unique:
-            unique = self._extract_projects_by_rules(search_text)
+            unique = self._drop_generic_epr(self._extract_projects_by_rules(search_text))
             if unique:
                 self._log(f"规则提取项目(无附件四匹配): {[p['standard_name'] for p in unique]}")
 
         if not unique:
             self._log(f"项目未匹配: {subject[:40]}", "warning")
 
-        return {"projects": unique}
+        return {"projects": unique, "epr_form": None, "need_review": False,
+                "groups": None}
+
+    @staticmethod
+    def _pick_epr_form(attachments: list) -> Optional[dict]:
+        """从附件(含压缩包内)中挑出 EPR 申请表勾选结果; 多份时取勾选最多的那份"""
+        forms = []
+        for att in attachments or []:
+            for f in att.get("epr_forms") or []:
+                if f:
+                    forms.append(f)
+        if not forms:
+            return None
+        forms.sort(
+            key=lambda f: (len(f.get("projects") or []) + len(f.get("unmatched_countries") or [])),
+            reverse=True,
+        )
+        return forms[0]
+
+    def _extract_from_plain_attachments(self, attachments: list, subject: str) -> List[Dict]:
+        """混合场景补充: 从「不含复选框的附件」里提取项目, 并用主题做闸门过滤。
+
+        背景:
+          同一封邮件可能既有可勾选式申请表(如 法国电池法申请表.xlsx), 又有旧式无勾选
+          申请表(如 荷兰EPR申请表.xlsx / 意大利EPR申请表.xlsx)。旧式表把整张
+          「国家 × 业务」网格(荷兰WEEE产品信息 / 荷兰电池法信息 / 荷兰包装法信息)
+          都写进了单元格, 纯文本扫描会炸出一堆并不存在的组合。
+          做法: 只在这些旧式附件里扫, 且**仅保留主题中同时出现「国家」与「业务」的组合**,
+                主题是客户/代理自己写的业务声明, 是这一场景下最可靠的锚点。
+        """
+        if not subject:
+            return []
+        plain_text = []
+        for att in attachments or []:
+            if att.get("epr_forms"):
+                continue  # 勾选表的文本(含整张网格)不参与, 否则必然多提
+            plain_text.append(att.get("text_content") or "")
+            plain_text.append(att.get("filename") or "")
+        text = " ".join(plain_text)
+        if not text.strip():
+            return []
+
+        hits = self._extract_projects_by_rules(text)
+        kept = []
+        for h in hits:
+            if self._subject_declares(h["standard_name"], subject):
+                kept.append(h)
+        return kept
+
+    @staticmethod
+    def _subject_declares(standard_name: str, subject: str) -> bool:
+        """主题里是否同时声明了该项目对应的「国家」与「业务」"""
+        if not standard_name or not subject:
+            return False
+        subj = subject.lower()
+        country = next((c for c in COUNTRIES if standard_name.startswith(c)), None)
+        if not country:
+            return False
+        rest = standard_name[len(country):]
+        if country.lower() not in subj:
+            return False
+        if not rest:
+            return False
+        for std_bt, pat in FieldExtractor._BT_PATTERNS:
+            if rest == std_bt:
+                # 用该业务的全部别名回主题里找一遍
+                aliases = [a.replace("\\s*", "").replace("(?:法)?", "").strip("()|")
+                           for a in pat.split("|")]
+                return any(a and a.lower() in subj for a in aliases)
+        return False
+
 
     # 业务类型别名表: 标准名 → 正则别名
     _BT_PATTERNS = [
-        ("WEEE", r"weee"),
+        # 部分代理在主题里把 WEEE 简写成 EEE；只在国家×业务的实体模式中
+        # 使用这个别名，随后仍规范为“国家WEEE”。
+        ("WEEE", r"weee|eee"),
         ("电池法", r"电池法|电池"),
         ("包装法", r"包装法|包装"),
         ("一次性塑料", r"一次性塑料(?:法)?|塑料法"),
         ("EPR", r"epr"),
     ]
 
+    # 国家二字码别名 (主题常用缩写: "PL包装法" / "IT电池&WEEE" / "DE一次性塑料")
+    # 排除易撞英文单词的 no(挪威)/at(奥地利), 遇到它们仍走中文全名
+    _COUNTRY_CODES = {
+        "de": "德国", "nl": "荷兰", "ie": "爱尔兰", "it": "意大利", "be": "比利时",
+        "pl": "波兰", "dk": "丹麦", "fr": "法国", "cz": "捷克", "pt": "葡萄牙",
+        "se": "瑞典", "es": "西班牙", "lu": "卢森堡", "hu": "匈牙利", "fi": "芬兰",
+        "ro": "罗马尼亚", "ee": "爱沙尼亚", "ch": "瑞士", "gr": "希腊",
+        "uk": "英国", "gb": "英国", "ca": "加拿大", "lv": "拉脱维亚",
+    }
+
+    # 英文公司后缀 (词边界锚定, 防止 "attachments" 之类误命中)
+    _COMPANY_EN_LETTER_CHARS = "A-Za-zÀ-ÖØ-öø-ÿĄĆĘŁŃÓŚŹŻąćęłńóśźż"
+    _COMPANY_EN_CHARS = _COMPANY_EN_LETTER_CHARS + r"0-9 .,&'’()\-"
+    _COMPANY_EN_SUFFIX = (
+        r"(?:CO\.,?\s*LTD\.?|LIMITED|LTD\.?|LLC|INC\.?|GMBH|GBR|"
+        r"B\.V\.?|S\.A\.S|SAS|N\.V|PTE\.?\s*LTD\.?|PTY\.?\s*LTD\.?|"
+        r"CORPORATION|CORP\.?|S\.L\.?|"
+        r"SP[ÓO]ŁKA\s+Z\s+OGRANICZON[ĄA]\s+ODPOWIEDZIALNO[ŚS]CI[ĄA])"
+    )
+
+    # 公司名候选里出现这些词 → 是表单说明文字, 不是公司名
+    _DISCLAIMER_HINTS = (
+        "适用", "適用", "说明", "說明", "如下", "董事", "成员", "成員",
+        "邮箱", "郵箱", "法人", "上述", "授權", "授权", "確認", "确认",
+        "提供", "境外", "注册证书", "註冊證書", "注册一个", "申請表", "申请表",
+        "公司名称", "企业名称", "营业执照", "所需资料", "申请资料", "填写", "填报",
+        "其他欧盟", "第三国", "设立的公司",
+        "非中国公司", "foreign company", "non-chinese company",
+        "客户信息", "公司信息", "贵司", "本公司", "申请人",
+    )
+
+    def _country_names_in(self, seg: str) -> List[str]:
+        """一段文本里出现哪些国家(中文全名或二字码), 返回中文国名(去重保序)"""
+        out = []
+        for c in COUNTRIES:
+            if c in seg and c not in out:
+                out.append(c)
+        for code, c in self._COUNTRY_CODES.items():
+            if re.search(rf"\b{code}\b", seg) and c not in out:
+                out.append(c)
+        return out
+
     def _extract_projects_by_rules(self, text: str) -> List[Dict]:
         """
         离线规则提取项目: 不依赖附件四，扫描 "国家+业务类型" 相邻模式
-        覆盖: "德国WEEE"、"法国包装法"、"波兰荷兰包装法"(国家连排)、"WEEE德国"(反序)
+        覆盖: "德国WEEE"、"法国包装法"、"波兰荷兰包装法"(国家连排)、
+              "德国和奥地利包装法"(和/与/及连排)、"WEEE德国"(反序)、
+              "PL包装法"/"IT电池&WEEE"(二字码)
         """
         if not text:
             return []
         text_l = text.lower()
-        country_alt = "|".join(COUNTRIES)
+        # 国家 alternation: 中文全名 + 带词边界的二字码
+        country_alt = "|".join(COUNTRIES) + "|" + "|".join(
+            rf"\b{code}\b" for code in self._COUNTRY_CODES
+        )
+        # 国家连排: 德国 / 德国荷兰 / 德国和奥地利 (允许 和/与/及/、 分隔及空白)
+        country_run = rf"(?:{country_alt})(?:\s*[和与及、,，+＋/／&＆;；]\s*(?:{country_alt}))*"
         found = []
         seen = set()
 
@@ -530,31 +2218,46 @@ class FieldExtractor:
                 found.append({"raw_value": raw, "standard_name": std})
 
         for std_bt, bt_pat in self._BT_PATTERNS:
-            # 模式1: 国家+业务 (含国家连排: "波兰荷兰包装法")
-            for m in re.finditer(f"((?:{country_alt})+)(?:{bt_pat})", text_l):
-                seg = m.group(1)
-                for c in COUNTRIES:
-                    if c in seg:
-                        _add(m.group(0), c + std_bt)
+            # 模式1: 国家+业务 (含国家连排与二字码)
+            for m in re.finditer(rf"({country_run})\s*(?:{bt_pat})", text_l):
+                for c in self._country_names_in(m.group(1)):
+                    _add(m.group(0), c + std_bt)
             # 模式2: 业务+国家 (反序, 如 "WEEE德国")
-            for m in re.finditer(f"(?:{bt_pat})((?:{country_alt})+)", text_l):
-                seg = m.group(1)
-                for c in COUNTRIES:
-                    if c in seg:
-                        _add(m.group(0), c + std_bt)
+            for m in re.finditer(rf"(?:{bt_pat})\s*({country_run})", text_l):
+                for c in self._country_names_in(m.group(1)):
+                    _add(m.group(0), c + std_bt)
 
-        # 模式3: 国家+业务1(+业务2...) 共享国家前缀 (如 "荷兰WEEE+包装法"、"德国WEEE/电池法/包装法")
+        # 模式3: 国家+业务1(+业务2...) 共享国家前缀
+        #   (如 "荷兰WEEE+包装法"、"IT电池&WEEE"、"德国WEEE/电池法/包装法")
         all_bt = "|".join(pat for _, pat in self._BT_PATTERNS)
         alias_to_std = {}
         for std_bt, pat in self._BT_PATTERNS:
             for alias in pat.split("|"):
                 alias_to_std[alias] = std_bt
-        for m in re.finditer(f"({country_alt})((?:{all_bt})(?:\\s*[+＋/／、，,]\\s*(?:{all_bt}))+)", text_l):
-            c = m.group(1)
+        sep = r"\s*[+＋/／、，,&＆;；和与及]\s*"
+        for m in re.finditer(rf"({country_alt})\s*((?:{all_bt})(?:{sep}(?:{all_bt}))+)", text_l):
+            c = self._country_names_in(m.group(1))[0]
             for bt_m in re.finditer(all_bt, m.group(2)):
                 _add(m.group(0), c + alias_to_std[bt_m.group(0)])
 
         return found
+
+    @staticmethod
+    def _drop_generic_epr(projects: List[Dict]) -> List[Dict]:
+        """同国家已有具体业务(WEEE/电池法/包装法/一次性塑料)时, 去掉泛称的"国家EPR" """
+        specific = set()
+        for p in projects:
+            n = p.get("standard_name", "")
+            for c in COUNTRIES:
+                if n.startswith(c) and n != c + "EPR":
+                    specific.add(c)
+        out = []
+        for p in projects:
+            n = p.get("standard_name", "")
+            if n.endswith("EPR") and any(n.startswith(c) for c in specific):
+                continue
+            out.append(p)
+        return out
 
     def _calc_confidence(self, agent_r: dict, customer_r: dict, proj_r: dict) -> str:
         """计算置信度"""
