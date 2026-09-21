@@ -2452,6 +2452,44 @@ def test_workbench_filtered_route_round_trip():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_workbench_deduplicates_active_and_filtered_mail_counts():
+    """同一邮件同时出现在阶段一主表和过滤日志时，只能计数一次。"""
+    print("== 工作台 主队列/过滤日志重叠去重 ==")
+    from pathlib import Path
+    from openpyxl import Workbook
+    import workbench_server as W
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        primary = tmp / "to_workorder_list.xlsx"
+        wb = Workbook(); ws = wb.active; ws.title = "工单待查"
+        ws.append(["发件人邮箱", "发件日期", "邮件主题", "邮件正文摘要(最多300字)", "附件名称",
+                   "代理", "客户公司名称", "标准化项目名称", "需求", "置信度"])
+        ws.append(["same@example.com", "2026-09-17T10:00:00", "重复邮件", "正文", "a.xlsx",
+                   "代理甲", "公司甲", "德国WEEE", "注册", "high"])
+        wb.save(primary)
+        filtered = tmp / "filtered_mail_record.xlsx"
+        wb = Workbook(); ws = wb.active; ws.title = "过滤日志"
+        ws.append(["发件人邮箱", "发件日期", "主题", "正文摘要", "附件名称", "过滤原因", "处理时间戳"])
+        ws.append(["same@example.com", "2026-09-17 10:00:00", "重复邮件", "旧过滤记录", "a.xlsx",
+                   "旧规则记录", "2026-09-17 10:01:00"])
+        ws.append(["other@example.com", "2026-09-17 11:00:00", "唯一过滤邮件", "过滤正文", "b.pdf",
+                   "证书通知", "2026-09-17 11:01:00"])
+        wb.save(filtered)
+        store = W.WorkbenchStore(
+            primary_path=str(primary), review_path=str(tmp / "none.xlsx"),
+            filtered_path=str(filtered), state_path=str(tmp / "state.json"), test_mode=True,
+        )
+        snap = store.snapshot()
+        check("工作台: 重叠邮件只保留在询单队列", len(snap["mails"]) == 1 and not any(
+            mail["sender"] == "same@example.com" for mail in snap["filtered_mails"]
+        ), snap)
+        check("工作台: 独立过滤邮件仍保留", len(snap["filtered_mails"]) == 1 and snap["filtered_mails"][0]["sender"] == "other@example.com", snap)
+        check("工作台: 输出重叠与唯一总数", snap["counts"].get("overlap_removed") == 1 and snap["counts"].get("unique_mails") == 2, snap["counts"])
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_workbench_history_records_workorder_outcomes():
     """工单“找到/漏单/查询失败”必须进入按邮件日期归档的完成或未完成总表。"""
     print("== 工作台 工单结论历史归档 ==")
@@ -3886,6 +3924,7 @@ def main():
         test_workbench_prefers_valid_history_over_stale_rows,
         test_workbench_persistent_history_totals,
         test_workbench_filtered_route_round_trip,
+        test_workbench_deduplicates_active_and_filtered_mail_counts,
         test_workbench_history_records_workorder_outcomes,
         test_workbench_database,
         test_workbench_persistent_mail_and_detail_numbers,

@@ -133,7 +133,7 @@
       <div class="banner"><span id="view-banner"><b>工作方式：</b>系统先读取阶段一输出并展示证据，人工确认后才进入后续工单比对。</span><span class="muted" id="source-path"></span></div>
       <section class="stats" id="stats"></section>
         <section class="work">
-        <aside class="card queue"><div class="card-head"><h2 id="queue-title">询单队列</h2><span class="muted" id="queue-count"></span></div><div class="queue-tools"><input class="search" id="search" placeholder="搜索主题、公司、代理、项目、发件人…"/><div class="filters" id="filters"><button class="on" data-filter="all">全部</button><button data-filter="review">待复核</button><button data-filter="ready">待确认</button><button data-filter="confirmed">已完成</button></div><div class="queue-selectbar" id="queue-selectbar"><button class="btn small" id="select-visible">全选当前列表</button><button class="btn small" id="clear-selected">清除选择</button><span class="selected-count" id="selected-count">已选0封</span></div></div><div class="queue-list" id="queue-list"></div></aside>
+        <aside class="card queue"><div class="card-head"><h2 id="queue-title">询单队列</h2><span class="muted" id="queue-count"></span></div><div class="queue-tools"><input class="search" id="search" placeholder="搜索邮件编号、主题、公司、代理、项目、发件人…"/><div class="filters" id="filters"><button class="on" data-filter="all">全部</button><button data-filter="review">待复核</button><button data-filter="ready">待确认</button><button data-filter="confirmed">已完成</button></div><div class="queue-selectbar" id="queue-selectbar"><button class="btn small" id="select-visible">全选当前列表</button><button class="btn small" id="clear-selected">清除选择</button><span class="selected-count" id="selected-count">已选0封</span></div></div><div class="queue-list" id="queue-list"></div></aside>
         <div class="splitter" data-splitter="queue" role="separator" aria-label="调整询单队列宽度" tabindex="0"></div>
         <section class="card detail" id="detail"></section>
         <div class="splitter" data-splitter="evidence" role="separator" aria-label="调整字段证据宽度" tabindex="0"></div>
@@ -222,19 +222,38 @@
   function bindQueueSelection(){document.querySelectorAll('[data-select-mail]').forEach(n=>{n.onclick=e=>e.stopPropagation();n.onchange=e=>{e.stopPropagation();if(n.checked)app.selectedMailIds.add(n.dataset.selectMail);else app.selectedMailIds.delete(n.dataset.selectMail);renderBulkButton()}});renderBulkButton()}
   function renderStats(){const c=app.data.counts;$('#stats').innerHTML=[['mails','封邮件',''],['details','条业务明细',''],['review','待人工复核','amber'],['confirmed','已确认交接','green'],['filtered','过滤参考','red']].map(x=>`<div class="stat ${x[2]}"><div class="num">${c[x[0]]??0}</div><div class="label">${x[1]}</div></div>`).join('');$('#filtered-nav-count').textContent=filteredMails().length||''}
   function searchNorm(value){return String(value??'').normalize('NFKC').toLowerCase().replace(/[\s\-_/.,，。:：;；|+()（）【】\[\]{}]+/g,'')}
+  function searchTokens(value){return String(value??'').normalize('NFKC').toLowerCase().split(/[\s\-_/.,，。:：;；|+()（）【】\[\]{}]+/).map(searchNorm).filter(Boolean)}
   function fuzzyContains(value,query){const text=searchNorm(value),needle=searchNorm(query);if(!needle)return true;if(text.includes(needle))return true;if(needle.length<2)return false;let cursor=0,matched=0;for(const char of needle){const found=text.indexOf(char,cursor);if(found<0)continue;matched++;cursor=found+1}return matched/needle.length>=0.75}
   function mailDateKey(m){return String(m?.date||'').replace('T',' ').slice(0,10)}
   function dateMatches(m){const date=mailDateKey(m);if(!date)return !app.dateStart&&!app.dateEnd;if(app.dateStart&&date<app.dateStart)return false;if(app.dateEnd&&date>app.dateEnd)return false;return true}
-  function matchMail(m){
-    if(!dateMatches(m))return false;
-    const q=app.search.trim();if(!q)return true;
+  function mailSearchFields(m){
     const detailFields=(m.details||[]).flatMap(d=>{
       const f=d.fields||{};const evidence=(d.evidence||[]).flatMap(e=>[e.initial,e.accepted,e.label,e.source]);
       const attachment=(Array.isArray(d.attachment_evidence)?d.attachment_evidence:[]).flatMap(a=>[a.filename,a.text,...(Array.isArray(a.records)?a.records:[]).flatMap(r=>Array.isArray(r.cells)?r.cells:[])]);
-      return [f.company,f.agent,f.country,f.program,f.request,d.source,d.review_hint,...evidence,...attachment];
+      return [d.id,d.detail_number,f.company,f.customer_code,f.company_code,f.agent,f.country,f.program,f.request,d.source,d.review_hint,...evidence,...attachment];
     });
-    const fields=[m.subject,m.sender,m.recipient,m.date,m.operation_date,m.body,m.raw_body,m.attachments,m.reason,m.intent_status,...detailFields];
-    return fields.some(field=>fuzzyContains(field,q))||fuzzyContains(fields.join(''),q)
+    return [m.mail_number,m.id,m.subject,m.sender,m.recipient,m.date,m.operation_date,m.body,m.raw_body,m.attachments,m.reason,m.intent_status,...detailFields].filter(v=>v!==null&&v!==undefined&&String(v)!=='');
+  }
+  function searchScore(m){
+    if(!dateMatches(m))return -1;
+    const query=String(app.search||'').trim();if(!query)return 0;
+    const needle=searchNorm(query);if(!needle)return 0;
+    const fields=mailSearchFields(m).map(searchNorm).filter(Boolean);
+    if(fields.some(v=>v===needle))return 100;
+    if(fields.some(v=>v.includes(needle)))return 90;
+    const tokens=searchTokens(query);
+    if(tokens.length>1&&tokens.every(token=>fields.some(v=>v.includes(token))))return 80;
+    if(fields.some(v=>fuzzyContains(v,query)))return 30;
+    return 0;
+  }
+  function rankSearchResults(mails){
+    const query=String(app.search||'').trim();if(!query)return mails;
+    const scored=mails.map((mail,index)=>({mail,score:searchScore(mail),index})).filter(item=>item.score>0);
+    const strong=scored.filter(item=>item.score>=80);
+    return (strong.length?strong:scored).sort((a,b)=>b.score-a.score||a.index-b.index).map(item=>item.mail);
+  }
+  function matchMail(m){
+    return searchScore(m)>=0;
   }
   function renderQueue(){
     if(app.view==='filtered'){
@@ -276,8 +295,9 @@
     const isFiltered=app.view==='filtered',isMissing=app.view==='missing';
     let mails=isFiltered?filteredMails():(isMissing?(app.data.missing_mails||[]):(app.data.mails||[]));
     if(!isFiltered&&!isMissing&&app.view!=='unfinished')mails=mails.filter(m=>app.filter==='all'||m.status===app.filter);
-    return mails.filter(matchMail);
+    return rankSearchResults(mails.filter(matchMail));
   }
+  function queueCountLabel(mails){const query=String(app.search||'').trim();if(!query)return `${mails.length} 封`;return mails.length===1?'1 封唯一命中':`${mails.length} 封命中`}
   function mailIsComplete(m){const w=m?.workorder_summary||{};return m?.status==='confirmed'||(Number(w.total||0)>0&&Number(w.pending||0)===0)}
   function mailBusiness(m){const values=[...new Set((m.details||[]).map(d=>d?.fields?.request).filter(Boolean))];return values.join('、')||'待判定'}
   function decorateQueueCards(){
@@ -348,7 +368,7 @@
   renderQueue=function(){
     const mails=queueMails(),isFiltered=app.view==='filtered',isUnfinished=app.view==='unfinished',isMissing=app.view==='missing';
     $('#queue-title').textContent=isFiltered?'已过滤邮件':(isMissing?'漏单邮件':'询单队列');
-    $('#queue-count').textContent=mails.length+' 封';
+    $('#queue-count').textContent=queueCountLabel(mails);
     $('#filters').style.display=(isFiltered||isUnfinished||isMissing)?'none':'flex';
     if(isFiltered){
       $('#queue-list').innerHTML=mails.length?mails.map(m=>`<div class="mail-item filtered-item ${app.mailId===m.id?'active':''}" data-mail="${esc(m.id)}"><div class="mail-line"><input class="mail-select" type="checkbox" data-select-mail="${esc(m.id)}" ${app.selectedMailIds.has(m.id)?'checked':''} aria-label="选择邮件"/><div class="mail-subject">${esc(m.subject||'无主题')}</div></div><div class="mail-meta"><span>${esc(m.sender||'未知发件人')}</span><span>${esc(m.date||'')}</span></div><div class="filter-reason">过滤原因：${esc(m.reason||'未记录')}</div><div style="margin-top:7px;display:flex;justify-content:space-between;align-items:center"><span class="muted">${m.settled?'已定论过滤':'待人工确认'}</span><span class="pill review">已过滤</span></div></div>`).join(''):'<div class="empty">没有符合条件的已过滤邮件</div>';
