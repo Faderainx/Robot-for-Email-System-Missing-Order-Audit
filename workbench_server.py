@@ -433,6 +433,28 @@ def _repair_attachment_fields(row: Dict[str, Any]) -> Dict[str, Any]:
     return row
 
 
+def _prepare_workbench_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """保留无法确认公司的明细，但不把说明句显示成公司名称。
+
+    ``一家公司``、``非中国公司``、表单字段标签等值不能作为客户主体。
+    以前读取阶段直接丢弃整行，结果邮件和业务明细数量减少，操作人员也看不到
+    需要人工补全的邮件。现在保留这条明细，清空展示用公司字段并标记为低置信度；
+    原始值放在内部审计字段中，便于追溯而不会误导工单核对。
+    """
+    if not isinstance(row, dict):
+        return row
+    company = _text(row.get("客户公司名称") or row.get("客户") or row.get("company"))
+    if company and _is_non_company_customer_value(company):
+        row.setdefault("原始客户公司名称", company)
+        row["客户公司名称"] = ""
+        row["客户"] = ""
+        row["company"] = ""
+        row["客户提取来源"] = "未识别，待人工确认"
+        row["人工复核提示"] = _text(row.get("人工复核提示")) or "邮件中未找到可确认的公司名称"
+        row["置信度"] = "low"
+    return row
+
+
 def _is_non_company_customer_value(value: Any) -> bool:
     """判断历史导入的客户值是否是 EPR 表单标签而非主体名称。
 
@@ -938,7 +960,10 @@ class WorkbenchStore:
         records.extend(_read_sheet(self.review_path, "漏单复查", "人工补全"))
         # 兼容旧版阶段一：附件证据中的“代理 | 编号 | 公司中文名”
         # 可修复城市冒充公司、代理为空等确定性错误，再写入持久数据库。
-        records = [_repair_attachment_fields(dict(row)) for row in records]
+        records = [
+            _prepare_workbench_row(_repair_attachment_fields(dict(row)))
+            for row in records
+        ]
         # 仅用于当前队列展示的兼容过滤：保留原始 rows 进入数据库，
         # 但隐藏同一封邮件中被语义校验明确判定为“应改回已有主记录”的
         # 旧人工补全行，避免一封邮件被显示成多个虚假的业务明细。
@@ -953,16 +978,8 @@ class WorkbenchStore:
                 source_path=f"{self.primary_path};{self.review_path}",
             )
             stored = [
-                _repair_attachment_fields(dict(row))
+                _prepare_workbench_row(_repair_attachment_fields(dict(row)))
                 for row in self.database.read_rows("active")
-            ]
-            # 数据库中可能留有旧版本误抽取的表单字段。保留它们用于历史
-            # 追溯，但不再把确定性脏值显示为业务明细或带入工单核对。
-            stored = [
-                row for row in stored
-                if not _is_non_company_customer_value(
-                    row.get("客户公司名称") or row.get("客户") or row.get("company")
-                )
             ]
             # 数据库保留完整导入历史，但当前工作台展示仍必须隐藏同一封邮件
             # 中已被有效主记录覆盖的旧版“人工补全”行。接口增量导入时通常没有
@@ -970,12 +987,7 @@ class WorkbenchStore:
             # 先对数据库读取结果统一做展示层过滤，避免旧的 7 条项目重新出现。
             stored_display = _hide_superseded_review_rows(stored)
             if records:
-                fresh = [
-                    row for row in display_records
-                    if not _is_non_company_customer_value(
-                        row.get("客户公司名称") or row.get("客户") or row.get("company")
-                    )
-                ]
+                fresh = list(display_records)
                 fresh_by_mail: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
                 stored_by_mail: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
                 for row in fresh:
@@ -1042,12 +1054,7 @@ class WorkbenchStore:
                 return stored_display
         # 测试/临时会话没有数据库覆盖层，也必须使用与正式工作台相同的
         # 历史脏值过滤规则，避免测试页面重新显示发件方说明句客户。
-        return [
-            row for row in display_records
-            if not _is_non_company_customer_value(
-                row.get("客户公司名称") or row.get("客户") or row.get("company")
-            )
-        ]
+        return list(display_records)
 
     def _state(self) -> Dict[str, Any]:
         return _load_json(self.state_path)
