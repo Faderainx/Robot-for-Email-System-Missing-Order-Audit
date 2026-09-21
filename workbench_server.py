@@ -1053,7 +1053,7 @@ class WorkbenchStore:
             if stored_display:
                 return stored_display
         # 测试/临时会话没有数据库覆盖层，也必须使用与正式工作台相同的
-        # 历史脏值过滤规则，避免测试页面重新显示发件方说明句客户。
+        # 未识别公司清空与待复核规则，避免把发件方说明句继续显示成客户。
         return list(display_records)
 
     def _state(self) -> Dict[str, Any]:
