@@ -3632,6 +3632,79 @@ def test_workbench_database():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_workbench_persistent_mail_and_detail_numbers():
+    """邮件/明细编号跨重复读取保持不变，部分处理后可从 SQLite/JSON 恢复。"""
+    print("== 工作台 邮件与明细持久编号 ==")
+    from pathlib import Path
+    from openpyxl import Workbook
+    import workbench_server as W
+
+    tmp = Path(tempfile.mkdtemp())
+    old_review_state = W.REVIEW_STATE
+    old_history_dir = W.HISTORY_DIR
+    old_history_state = W.HISTORY_STATE
+    old_history_output = W.HISTORY_OUTPUT
+    try:
+        primary = tmp / "to_workorder_list.xlsx"
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "工单待查"
+        ws.append(["发件人邮箱", "发件日期", "邮件主题", "邮件正文摘要(最多300字)", "附件名称",
+                   "代理", "客户公司名称", "标准化项目名称", "需求", "置信度"])
+        ws.append(["idtest@example.com", "2026-09-21 09:00:00", "编号持久化测试", "正文", "申请表.xlsx",
+                   "代理甲", "测试公司甲", "德国包装法", "注册", "high"])
+        ws.append(["idtest@example.com", "2026-09-21 09:00:00", "编号持久化测试", "正文", "申请表.xlsx",
+                   "代理甲", "测试公司乙", "德国包装法", "注册", "high"])
+        wb.save(primary)
+
+        W.REVIEW_STATE = tmp / "storage" / "workbench_review.json"
+        W.HISTORY_DIR = tmp / "storage" / "workbench_history"
+        W.HISTORY_STATE = W.HISTORY_DIR / "mail_history.json"
+        W.HISTORY_OUTPUT = tmp / "output" / "workbench_history"
+        store = W.WorkbenchStore(
+            primary_path=str(primary), review_path=str(tmp / "none.xlsx"),
+            filtered_path=str(tmp / "none_filtered.xlsx"),
+        )
+        first = store.snapshot()
+        mail = first["mails"][0]
+        details = mail["details"]
+        assert mail.get("mail_number", "").startswith("MAIL-")
+        assert len(details) == 2 and all(d.get("detail_number", "").startswith("DETAIL-") for d in details)
+        mail_number = mail["mail_number"]
+        detail_numbers = {d["id"]: d["detail_number"] for d in details}
+
+        result = store.action({
+            "action": "confirm_detail",
+            "mail_id": mail["id"],
+            "mail_number": mail_number,
+            "record_id": details[0]["id"],
+            "detail_number": details[0]["detail_number"],
+            "reason": "只处理第一条",
+        })
+        assert result["ok"] and result["audit"]["mail_number"] == mail_number
+        assert result["audit"]["detail_number"] == details[0]["detail_number"]
+
+        restarted = W.WorkbenchStore(
+            primary_path=str(primary), review_path=str(tmp / "none.xlsx"),
+            filtered_path=str(tmp / "none_filtered.xlsx"),
+        )
+        second = restarted.snapshot()
+        mail2 = second["mails"][0]
+        detail2 = {d["id"]: d for d in mail2["details"]}
+        assert mail2["mail_number"] == mail_number
+        assert {d["id"]: d["detail_number"] for d in mail2["details"]} == detail_numbers
+        assert detail2[details[0]["id"]]["status"] == "confirmed"
+        assert detail2[details[1]["id"]]["status"] != "confirmed"
+        operations = restarted.database.read_operations()
+        assert operations and operations[0]["result"]["audit"]["detail_number"] == details[0]["detail_number"]
+    finally:
+        W.REVIEW_STATE = old_review_state
+        W.HISTORY_DIR = old_history_dir
+        W.HISTORY_STATE = old_history_state
+        W.HISTORY_OUTPUT = old_history_output
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_workbench_missing_mail_round_trip():
     """漏单可人工同步，也可进入自动重查队列，且结果覆盖旧漏单。"""
     print("== 工作台 漏单回流与工单同步 ==")
@@ -3761,6 +3834,7 @@ def main():
         test_workbench_filtered_route_round_trip,
         test_workbench_history_records_workorder_outcomes,
         test_workbench_database,
+        test_workbench_persistent_mail_and_detail_numbers,
         test_workbench_missing_mail_round_trip,
     ]
     for t in tests:

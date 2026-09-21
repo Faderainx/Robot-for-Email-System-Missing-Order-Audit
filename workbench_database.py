@@ -110,6 +110,16 @@ def _key(value: str) -> str:
     return hashlib.sha1(value.encode("utf-8", errors="ignore")).hexdigest()[:24]
 
 
+def _mail_number(mail_key: str) -> str:
+    """给邮件生成可展示、可跨重启复用的稳定编号。"""
+    return f"MAIL-{_text(mail_key).upper()}" if _text(mail_key) else ""
+
+
+def _detail_number(record_key: str) -> str:
+    """给业务明细生成可展示、可跨重启复用的稳定编号。"""
+    return f"DETAIL-{_text(record_key).upper()}" if _text(record_key) else ""
+
+
 class WorkbenchDatabase:
     """线程安全的轻量数据库访问层。
 
@@ -142,6 +152,8 @@ class WorkbenchDatabase:
                     record_key TEXT PRIMARY KEY,
                     dataset TEXT NOT NULL,
                     mail_key TEXT NOT NULL,
+                    mail_number TEXT,
+                    detail_number TEXT,
                     mail_date TEXT,
                     operation_date TEXT,
                     source_path TEXT,
@@ -178,6 +190,10 @@ class WorkbenchDatabase:
             )
             # 兼容第一版已经创建过的 workbench.db。
             columns = {row[1] for row in conn.execute("PRAGMA table_info(input_records)").fetchall()}
+            if "mail_number" not in columns:
+                conn.execute("ALTER TABLE input_records ADD COLUMN mail_number TEXT")
+            if "detail_number" not in columns:
+                conn.execute("ALTER TABLE input_records ADD COLUMN detail_number TEXT")
             if "operation_date" not in columns:
                 conn.execute("ALTER TABLE input_records ADD COLUMN operation_date TEXT")
                 conn.execute("UPDATE input_records SET operation_date=substr(updated_at,1,10) WHERE operation_date IS NULL")
@@ -210,11 +226,17 @@ class WorkbenchDatabase:
                 # 同一封邮件中完全相同的明细也要保留，使用本批出现序号区分。
                 record_key = _key(f"{dataset}|{base}|{occurrence}")
                 mail_key = _key(_mail_identity(row))
+                mail_number = _mail_number(mail_key)
+                # 明细编号不把 dataset 放进种子；同一邮件+公司+项目+需求在
+                # active、工单结果和人工同步覆盖层中应能对应到同一个编号。
+                detail_number = _detail_number(_key(f"{base}|{occurrence}"))
                 payload = _canonical_payload(row)
                 if not isinstance(payload, dict):
                     continue
                 payload["_db_record_key"] = record_key
                 payload["_db_mail_key"] = mail_key
+                payload["mail_number"] = mail_number
+                payload["detail_number"] = detail_number
                 payload["_db_operation_date"] = now[:10]
                 payload.setdefault("_legacy_id", _text(row.get("_id")))
                 payload.setdefault("_source_path", _text(source_path))
@@ -226,12 +248,14 @@ class WorkbenchDatabase:
                 conn.execute(
                     """
                     INSERT INTO input_records
-                        (record_key, dataset, mail_key, mail_date, operation_date, source_path,
+                        (record_key, dataset, mail_key, mail_number, detail_number, mail_date, operation_date, source_path,
                          payload_json, first_seen_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(record_key) DO UPDATE SET
                         dataset=excluded.dataset,
                         mail_key=excluded.mail_key,
+                        mail_number=excluded.mail_number,
+                        detail_number=excluded.detail_number,
                         mail_date=excluded.mail_date,
                         operation_date=excluded.operation_date,
                         source_path=excluded.source_path,
@@ -239,7 +263,7 @@ class WorkbenchDatabase:
                         updated_at=excluded.updated_at
                     """,
                     (
-                        record_key, dataset, mail_key, mail_date, now[:10], _text(source_path),
+                        record_key, dataset, mail_key, mail_number, detail_number, mail_date, now[:10], _text(source_path),
                         json.dumps(payload, ensure_ascii=False),
                         _text(old["first_seen_at"]) if old else now,
                         now,
@@ -264,6 +288,7 @@ class WorkbenchDatabase:
             rows = conn.execute(
                 """
                 SELECT record_key, payload_json
+                       , mail_key, mail_number, detail_number
                 FROM input_records
                 WHERE dataset=?
                 ORDER BY CASE WHEN mail_date='' THEN 1 ELSE 0 END,
@@ -272,6 +297,7 @@ class WorkbenchDatabase:
                 (dataset,),
             ).fetchall()
         result: List[Dict[str, Any]] = []
+        missing: List[tuple[str, str, str, str]] = []
         for item in rows:
             try:
                 payload = json.loads(item["payload_json"])
@@ -281,7 +307,26 @@ class WorkbenchDatabase:
                 continue
             payload["_id"] = _text(payload.get("_db_record_key")) or _text(item["record_key"])
             payload["_db_record_key"] = _text(item["record_key"])
+            stored_mail_number = _text(payload.get("mail_number")) or _text(item["mail_number"])
+            stored_detail_number = _text(payload.get("detail_number")) or _text(item["detail_number"])
+            mail_number = stored_mail_number or _mail_number(_text(item["mail_key"]))
+            detail_number = stored_detail_number or _detail_number(_text(item["record_key"]))
+            payload["mail_number"] = mail_number
+            payload["detail_number"] = detail_number
+            if (
+                not stored_mail_number
+                or not stored_detail_number
+            ):
+                missing.append((mail_number, detail_number, json.dumps(payload, ensure_ascii=False), _text(item["record_key"])))
             result.append(payload)
+        if missing:
+            now = self._now()
+            with self._lock, self._connect() as conn:
+                for mail_number, detail_number, payload_json, record_key in missing:
+                    conn.execute(
+                        "UPDATE input_records SET mail_number=?, detail_number=?, payload_json=?, updated_at=? WHERE record_key=?",
+                        (mail_number, detail_number, payload_json, now, record_key),
+                    )
         return result
 
     def record_operation(
