@@ -2471,7 +2471,7 @@ def test_workbench_deduplicates_active_and_filtered_mail_counts():
         filtered = tmp / "filtered_mail_record.xlsx"
         wb = Workbook(); ws = wb.active; ws.title = "过滤日志"
         ws.append(["发件人邮箱", "发件日期", "主题", "正文摘要", "附件名称", "过滤原因", "处理时间戳"])
-        ws.append(["same@example.com", "2026-09-17 10:00:00", "重复邮件", "旧过滤记录", "a.xlsx",
+        ws.append(["same@example.com", "2026-09-17 10:00:00", "重复- 邮件", "旧过滤记录", "a.xlsx",
                    "旧规则记录", "2026-09-17 10:01:00"])
         ws.append(["other@example.com", "2026-09-17 11:00:00", "唯一过滤邮件", "过滤正文", "b.pdf",
                    "证书通知", "2026-09-17 11:01:00"])

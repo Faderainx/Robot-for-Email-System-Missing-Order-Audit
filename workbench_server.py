@@ -15,6 +15,7 @@ import os
 import re
 import socket
 import threading
+import unicodedata
 import uuid
 import webbrowser
 from datetime import datetime, timezone
@@ -427,6 +428,38 @@ def _mail_number_from_row(row: Dict[str, Any]) -> str:
     if not identity.strip("|"):
         return ""
     return f"MAIL-{hashlib.sha1(identity.encode('utf-8', errors='ignore')).hexdigest()[:24].upper()}"
+
+
+def _mail_identity_aliases(mail: Dict[str, Any]) -> set[Tuple[str, ...]]:
+    """返回跨阶段一主表/过滤日志的邮件去重别名。
+
+    不同 Excel 输出可能对同一标题使用空格、标点或全角字符的不同写法，
+    不能只用原始 ``(发件人, 时间, 标题)`` 判断，否则同一封邮件会同时出现在
+    询单队列和过滤队列。邮件编号优先；标题别名用于兼容旧输出，日期只在同一
+    发件人和同一标题下参与匹配，避免把同一发件人的不同邮件误合并。
+    """
+    sender = _text(mail.get("sender") or mail.get("发件人邮箱")).casefold()
+    raw_date = mail.get("date") or mail.get("发件日期")
+    parsed = _mail_date_sort_value(raw_date)
+    date_key = parsed.strftime("%Y-%m-%d %H:%M:%S") if parsed != datetime.min else _text(raw_date).replace("T", " ")
+    day_key = date_key[:10]
+    subject = _text(mail.get("subject") or mail.get("邮件主题") or mail.get("主题"))
+    normalized_subject = re.sub(
+        r"[\W_]+", "", unicodedata.normalize("NFKC", subject).casefold(), flags=re.UNICODE
+    )
+    aliases: set[Tuple[str, ...]] = set()
+    number = _text(mail.get("mail_number") or mail.get("邮件编号")).casefold()
+    if number:
+        aliases.add(("number", number))
+    if sender and date_key and normalized_subject:
+        aliases.add(("subject-time", sender, date_key, normalized_subject))
+        aliases.add(("subject-day", sender, day_key, normalized_subject))
+    elif sender and date_key:
+        # 标题缺失时只能退化为发件人+时间，避免空标题的记录重复出现。
+        aliases.add(("sender-time", sender, date_key))
+    if not aliases and _text(mail.get("id")):
+        aliases.add(("id", _text(mail.get("id"))))
+    return aliases
 
 
 def _detail_number_from_row(row: Dict[str, Any]) -> str:
@@ -1437,17 +1470,14 @@ class WorkbenchStore:
             state["mails"] = entries
         now = _now()
 
-        normal_keys = {
-            self._mail_identity(mail.get("sender"), mail.get("date"), mail.get("subject"))
-            for mail in mails
-        }
+        normal_keys: set[Tuple[str, ...]] = set()
+        for mail in mails:
+            normal_keys.update(_mail_identity_aliases(mail))
         history_mails = list(mails)
         # 已在询单复核队列的过滤候选由其队列状态记录，避免同一封邮件双份入账。
         for filtered in filtered_mails:
-            key = self._mail_identity(
-                filtered.get("sender"), filtered.get("date"), filtered.get("subject")
-            )
-            if key in normal_keys:
+            aliases = _mail_identity_aliases(filtered)
+            if aliases & normal_keys:
                 continue
             history_mails.append({
                 "id": _text(filtered.get("id")),
@@ -1722,39 +1752,46 @@ class WorkbenchStore:
             # 同一封邮件如果已经出现在当前询单队列，就不能再在“已过滤邮件”中
             # 计数一次。这里按发件人+规范化日期+主题去重，避免出现“总邮件数
             # 275，但询单复核 121 + 已过滤 156 = 277”的重叠统计。
-            current_mail_keys = {
-                self._mail_identity(mail.get("sender"), mail.get("date"), mail.get("subject"))
-                for mail in active_mails
-                if _text(mail.get("sender")) or _text(mail.get("date")) or _text(mail.get("subject"))
-            }
+            current_mail_keys: set[Tuple[str, ...]] = set()
+            for mail in active_mails:
+                current_mail_keys.update(_mail_identity_aliases(mail))
             deduped_filtered: List[Dict[str, Any]] = []
-            seen_filtered = set()
+            seen_filtered: set[Tuple[str, ...]] = set()
             overlap_removed = 0
             # 人工路由优先于阶段一旧过滤日志，保留人工操作人的原因和时间。
-            manual_keys = set()
+            manual_keys: set[Tuple[str, ...]] = set()
             for item in manual_filtered:
-                key = self._mail_identity(item.get("sender"), item.get("date"), item.get("subject"))
-                has_identity = any(key)
-                dedup_key = key if has_identity else ("id", _text(item.get("id")))
-                if has_identity and key in current_mail_keys:
+                aliases = _mail_identity_aliases(item)
+                record_aliases = {alias for alias in aliases if alias[0] != "subject-day"}
+                if aliases & current_mail_keys:
                     overlap_removed += 1
                     continue
-                if dedup_key in seen_filtered:
+                if record_aliases & seen_filtered:
                     continue
-                seen_filtered.add(dedup_key)
-                if has_identity:
-                    manual_keys.add(key)
+                if aliases:
+                    seen_filtered.update(record_aliases)
+                    manual_keys.update(aliases)
+                else:
+                    fallback = ("id", _text(item.get("id")))
+                    if fallback in seen_filtered:
+                        continue
+                    seen_filtered.add(fallback)
                 deduped_filtered.append(item)
             for item in filtered_mails:
-                key = self._mail_identity(item.get("sender"), item.get("date"), item.get("subject"))
-                has_identity = any(key)
-                dedup_key = key if has_identity else ("id", _text(item.get("id")))
-                if has_identity and (key in current_mail_keys or key in manual_keys):
+                aliases = _mail_identity_aliases(item)
+                record_aliases = {alias for alias in aliases if alias[0] != "subject-day"}
+                if aliases & (current_mail_keys | manual_keys):
                     overlap_removed += 1
                     continue
-                if dedup_key in seen_filtered:
+                if record_aliases & seen_filtered:
                     continue
-                seen_filtered.add(dedup_key)
+                if aliases:
+                    seen_filtered.update(record_aliases)
+                else:
+                    fallback = ("id", _text(item.get("id")))
+                    if fallback in seen_filtered:
+                        continue
+                    seen_filtered.add(fallback)
                 deduped_filtered.append(item)
             filtered_mails = deduped_filtered
             mails = active_mails
