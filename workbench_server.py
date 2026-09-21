@@ -437,6 +437,69 @@ def _obvious_business_issues(row: Dict[str, Any]) -> List[dict]:
         return []
 
 
+def _semantic_program_suggestions(row: Dict[str, Any]) -> List[str]:
+    """Extract normalized program candidates from a legacy suggestion."""
+    for key in ("语义建议值", "语义校验建议", "语义校验原因", "人工复核提示"):
+        value = _text(row.get(key))
+        if not value:
+            continue
+        match = re.search(r"program\s*:\s*([^;；]+)", value, re.I)
+        if match:
+            candidate = match.group(1).strip()
+            # 旧 LLM 输出偶尔把“国家/标准项目”写在同一个 program 值中，
+            # 例如“德国/德国WEEE”；两部分都作为候选参与比对。
+            return [part.strip() for part in re.split(r"[/／]", candidate) if part.strip()]
+    return []
+
+
+def _hide_superseded_review_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Hide clearly superseded legacy LLM rows without deleting their source.
+
+    Some old runs wrote one valid primary row and several ``人工补全`` rows
+    generated from the same mail.  Those review rows are marked
+    ``PROJECT_COVERAGE_MISSING`` and explicitly recommend the already-valid
+    primary project.  They are stale correction candidates, not additional
+    businesses.  Keep them in Excel/SQLite for audit, but do not count them in
+    the active workbench queue.
+    """
+    by_mail: Dict[Tuple[str, str, str], List[Dict[str, Any]]] = {}
+    for row in rows:
+        by_mail.setdefault(_mail_identity_tuple(row), []).append(row)
+
+    result: List[Dict[str, Any]] = []
+    for row in rows:
+        if _text(row.get("_source")) != "人工补全":
+            result.append(row)
+            continue
+        if _text(row.get("语义校验状态")).lower() != "invalid":
+            result.append(row)
+            continue
+        issue_codes = _text(row.get("语义问题编号"))
+        if "PROJECT_COVERAGE_MISSING" not in issue_codes:
+            result.append(row)
+            continue
+
+        company = _text(row.get("客户公司名称") or row.get("客户") or row.get("company"))
+        project = _text(row.get("标准化项目名称") or row.get("项目") or row.get("program"))
+        suggestions = _semantic_program_suggestions(row)
+        primary_rows = [
+            candidate for candidate in by_mail.get(_mail_identity_tuple(row), [])
+            if _text(candidate.get("_source")) == "待查名单"
+            and _text(candidate.get("客户公司名称") or candidate.get("客户") or candidate.get("company")) == company
+            and _text(candidate.get("语义校验状态")).lower() not in {"invalid", "uncertain"}
+        ]
+        primary_projects = {
+            _text(candidate.get("标准化项目名称") or candidate.get("项目") or candidate.get("program"))
+            for candidate in primary_rows
+        }
+        if any(suggestion in primary_projects for suggestion in suggestions):
+            continue
+        # If a legacy row has no parseable suggestion, do not guess: keep it for
+        # manual review rather than silently dropping a potentially real project.
+        result.append(row)
+    return result
+
+
 def _safe_path(path: Optional[str], fallback: Path) -> Path:
     # 兼容旧版 session/config 中残留的开发机绝对路径。显式传入但尚未
     # 生成的临时路径必须原样保留（测试/用户刚选择的空结果文件不能被
@@ -704,6 +767,10 @@ class WorkbenchStore:
         # 兼容旧版阶段一：附件证据中的“代理 | 编号 | 公司中文名”
         # 可修复城市冒充公司、代理为空等确定性错误，再写入持久数据库。
         records = [_repair_attachment_fields(dict(row)) for row in records]
+        # 仅用于当前队列展示的兼容过滤：保留原始 rows 进入数据库，
+        # 但隐藏同一封邮件中被语义校验明确判定为“应改回已有主记录”的
+        # 旧人工补全行，避免一封邮件被显示成多个虚假的业务明细。
+        display_records = _hide_superseded_review_rows(records)
         if self.database is not None:
             # 先把本次阶段一输出增量写入数据库。数据库保存完整历史，
             # 但当前队列不能把同一封邮件在历次解析中产生的旧版本一起展示，
@@ -727,7 +794,7 @@ class WorkbenchStore:
             ]
             if records:
                 fresh = [
-                    row for row in records
+                    row for row in display_records
                     if not _is_non_company_customer_value(
                         row.get("客户公司名称") or row.get("客户") or row.get("company")
                     )
@@ -799,7 +866,7 @@ class WorkbenchStore:
         # 测试/临时会话没有数据库覆盖层，也必须使用与正式工作台相同的
         # 历史脏值过滤规则，避免测试页面重新显示发件方说明句客户。
         return [
-            row for row in records
+            row for row in display_records
             if not _is_non_company_customer_value(
                 row.get("客户公司名称") or row.get("客户") or row.get("company")
             )
