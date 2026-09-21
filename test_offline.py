@@ -1846,6 +1846,83 @@ def test_company_name_cross_source_consensus_and_code_prefix():
           fx._sanitize_customer_result({"customer": "不能与其它公司", "source": "附件内容"}))
 
 
+def test_agent_prefix_and_nested_attachment_company_evidence():
+    """代理粘连和 xlsx 中文空值/英文名应分别按证据处理。"""
+    print("== 代理前缀与附件英文公司名证据校验 ==")
+    from modules.field_extractor import FieldExtractor
+    import workbench_server as W
+
+    fx = FieldExtractor(
+        {"registration@tbvat.com": {"代理": "TBA", "代理简称": "TBA"}},
+        [{"项目名称": "意大利包装法", "国家": "意大利", "业务类型": "包装法"}],
+        ocr_fallback=False,
+    )
+    check(
+        "已知代理前缀不进入中文公司名",
+        fx._company_substring("TBA广州钛显互联网科技有限公司") == "广州钛显互联网科技有限公司",
+        fx._company_substring("TBA广州钛显互联网科技有限公司"),
+    )
+    check(
+        "SIA 法定前缀可识别为英文公司名",
+        fx._company_substring("TBA+SIA Andistef+意大利包装法") == "SIA Andistef",
+        fx._company_substring("TBA+SIA Andistef+意大利包装法"),
+    )
+    extracted = fx.extract_fields({
+        "subject": "TBA- 2026.08.25 IT包装法新注册",
+        "body_text": "TBA+SIA Andistef+意大利包装法\nTBA广州钛显互联网科技有限公司+意大利包装法",
+        "sender_email": "registration@tbvat.com",
+        "attachments": [],
+    })
+    customers = {row.get("客户") for row in extracted}
+    check(
+        "结构化明细保留英文公司且不带 TBA",
+        "SIA Andistef" in customers
+        and "广州钛显互联网科技有限公司" in customers
+        and all(not str(value or "").startswith("TBA") for value in customers),
+        customers,
+    )
+
+    prefix_row = W._repair_attachment_fields({
+        "代理": "TBA",
+        "客户公司名称": "TBA广州钛显互联网科技有限公司",
+        "客户": "TBA广州钛显互联网科技有限公司",
+        "附件证据": "[]",
+    })
+    check(
+        "工作台读取旧行时清洗代理前缀",
+        prefix_row.get("客户公司名称") == "广州钛显互联网科技有限公司"
+        and prefix_row.get("客户提取来源") == "代理前缀清洗",
+        prefix_row,
+    )
+
+    nested_row = W._repair_attachment_fields({
+        "客户公司名称": "",
+        "客户": "",
+        "邮件主题": "TBA+SIA Andistef+意大利包装法",
+        "附件明细来源": "附件表格：IT EPR.zip / General Info 第4行",
+        "附件证据": json.dumps([{
+            "filename": "IT EPR.zip",
+            "sheets": [{
+                "sheet_name": "General Info",
+                "rows": [{
+                    "row_number": 4,
+                    "cells": [
+                        "*公司中文名称 / Company name (in Chinese)", "", "",
+                        "*公司英文名称 / Company name (in English)", "SIA Andistef", "",
+                        "*城市City", "Riga",
+                    ],
+                }],
+            }],
+        }], ensure_ascii=False),
+    })
+    check(
+        "中文公司名为空时使用同一行英文公司名",
+        nested_row.get("客户公司名称") == "SIA Andistef"
+        and nested_row.get("客户提取来源") == "附件表格英文公司名",
+        nested_row,
+    )
+
+
 def test_epr_form_labels_are_not_customer_records():
     """EPR 申请表的法人/注册资本等标签不能被识别成客户明细。"""
     print("== EPR 表单标签拒绝式客户校验 ==")
@@ -3915,6 +3992,7 @@ def main():
         test_attachment_xlsx_record_authority,
         test_multi_project_company_count_and_generic_phrase,
         test_company_name_cross_source_consensus_and_code_prefix,
+        test_agent_prefix_and_nested_attachment_company_evidence,
         test_epr_form_labels_are_not_customer_records,
         test_stage1_semantic_routing_and_placeholder_dedupe,
         test_semantic_issue_template_fields,

@@ -415,9 +415,13 @@ def _repair_attachment_fields(row: Dict[str, Any]) -> Dict[str, Any]:
     # 同一行同时有中文和英文名时，中文名优先；中文为空时才会落到英文名。
     usable_pairs.sort(key=lambda pair: (0 if pair[1] == "附件表格中文公司名" else 1, -len(pair[0])))
     replacement = next(
-        (candidate, kind) for candidate, kind in usable_pairs
-        if candidate != current_company
-    ) if usable_pairs else ("", "")
+        (
+            (candidate, kind)
+            for candidate, kind in usable_pairs
+            if candidate != current_company
+        ),
+        ("", ""),
+    )
     if replacement[0] and not _looks_like_company_name(current_company):
         row["客户公司名称"] = replacement[0]
         row["客户"] = replacement[0]
