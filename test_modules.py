@@ -271,6 +271,41 @@ def test_field_extractor():
     print("  德国包装法/WEEE 专项边界校验 ✓")
     return True
 
+
+def test_workbench_stale_review_suppression():
+    """同一邮件已有有效主记录时，旧语义纠错行不应继续计数。"""
+    from workbench_server import _hide_superseded_review_rows
+
+    base = {
+        "发件人邮箱": "agent3@example.com",
+        "发件日期": "2026-08-25 17:57:54",
+        "邮件主题": "上海古道+香港美美的芳电子商务有限公司+德国WEEE",
+        "客户公司名称": "香港美美的芳电子商务有限公司",
+        "需求": "新增",
+    }
+    rows = [
+        {
+            **base,
+            "_source": "待查名单",
+            "标准化项目名称": "德国WEEE",
+            "语义校验状态": "valid",
+        },
+        {
+            **base,
+            "_source": "人工补全",
+            "标准化项目名称": "德国包装法",
+            "语义校验状态": "invalid",
+            "语义问题编号": "PROJECT_COVERAGE_MISSING",
+            "语义建议值": "program: 德国/德国WEEE；agent: 上海古道",
+        },
+    ]
+    kept = _hide_superseded_review_rows(rows)
+    if len(kept) != 1 or kept[0].get("标准化项目名称") != "德国WEEE":
+        print(f"  旧语义纠错行未被隐藏: {kept}")
+        return False
+    print("  旧语义纠错行不再制造额外业务明细 ✓")
+    return True
+
 # ============================================================
 # T4: 项目标准化模块 M4
 # ============================================================
