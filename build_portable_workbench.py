@@ -39,6 +39,7 @@ workorder:
   headless_fallback_to_headed: true
   login_state_path: storage/login_state.json
   login_wait_seconds: 120
+  login_refresh_interval_seconds: 900
   field_timeout_seconds: 5
   dropdown_timeout_seconds: 5
   query_click_settle_seconds: 0.3

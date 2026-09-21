@@ -3705,6 +3705,60 @@ def test_workbench_persistent_mail_and_detail_numbers():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_workbench_change_exports_and_idempotent_actions():
+    """人工修改/新增明细应实时留痕，重试同一请求不能重复写入。"""
+    print("== 工作台 修改/新增明细导出与幂等操作 ==")
+    from pathlib import Path
+    from openpyxl import Workbook, load_workbook
+    import workbench_server as W
+
+    tmp = Path(tempfile.mkdtemp())
+    old_review_state, old_history_dir = W.REVIEW_STATE, W.HISTORY_DIR
+    old_history_state, old_history_output = W.HISTORY_STATE, W.HISTORY_OUTPUT
+    try:
+        primary = tmp / "to_workorder_list.xlsx"
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "工单待查"
+        ws.append(["发件人邮箱", "发件日期", "邮件主题", "代理", "客户公司名称", "标准化项目名称", "需求", "置信度"])
+        ws.append(["audit@example.com", "2026-09-21 09:00:00", "变更导出测试", "代理甲", "原公司", "德国包装法", "注册", "high"])
+        wb.save(primary)
+        W.REVIEW_STATE = tmp / "storage" / "workbench_review.json"
+        W.HISTORY_DIR = tmp / "storage" / "workbench_history"
+        W.HISTORY_STATE = W.HISTORY_DIR / "mail_history.json"
+        W.HISTORY_OUTPUT = tmp / "output" / "workbench_history"
+        store = W.WorkbenchStore(primary_path=str(primary), review_path=str(tmp / "none.xlsx"), filtered_path=str(tmp / "none_filtered.xlsx"))
+        snap = store.snapshot()
+        mail, detail = snap["mails"][0], snap["mails"][0]["details"][0]
+        payload = {
+            "action": "edit", "request_id": "test-edit-once", "mail_id": mail["id"],
+            "mail_number": mail["mail_number"], "detail_number": detail["detail_number"],
+            "record_id": detail["id"], "subject": mail["subject"],
+            "fields": {"company": "修改后公司"}, "reason": "测试修改",
+        }
+        first = store.action(payload)
+        second = store.action(payload)
+        assert first.get("change_type") == "modified_detail" and second == first
+        state = json.loads(W.REVIEW_STATE.read_text(encoding="utf-8"))
+        assert len([x for x in state.get("change_log", []) if x.get("kind") == "modified_detail"]) == 1
+        added = store.action({
+            "action": "add_project", "request_id": "test-add-once", "mail_id": mail["id"],
+            "mail_number": mail["mail_number"], "mail": {"sender": mail["sender"], "date": mail["date"], "subject": mail["subject"]},
+            "fields": {"agent": "代理甲", "company": "新增公司", "country": "德国", "program": "德国WEEE", "request": "注册"},
+            "reason": "测试新增",
+        })
+        assert added.get("change_type") == "added_detail"
+        out = store.export()
+        exported = load_workbook(out, read_only=True, data_only=True)
+        assert "修改明细" in exported.sheetnames and "新增明细" in exported.sheetnames
+        assert exported["修改明细"].max_row >= 2 and exported["新增明细"].max_row >= 2
+        exported.close()
+    finally:
+        W.REVIEW_STATE, W.HISTORY_DIR = old_review_state, old_history_dir
+        W.HISTORY_STATE, W.HISTORY_OUTPUT = old_history_state, old_history_output
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_workbench_missing_mail_round_trip():
     """漏单可人工同步，也可进入自动重查队列，且结果覆盖旧漏单。"""
     print("== 工作台 漏单回流与工单同步 ==")
@@ -3835,6 +3889,7 @@ def main():
         test_workbench_history_records_workorder_outcomes,
         test_workbench_database,
         test_workbench_persistent_mail_and_detail_numbers,
+        test_workbench_change_exports_and_idempotent_actions,
         test_workbench_missing_mail_round_trip,
     ]
     for t in tests:

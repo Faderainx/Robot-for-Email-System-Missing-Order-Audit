@@ -293,6 +293,7 @@ Pydantic 校验 → 确定性业务校验 → 语义复检 Agent → Pydantic �
 | `url` | str | `https://mp.ecopv-epr.com/workbench/main` | 工单系统登录页 |
 | `username` / `password` | str | — | 工单系统账号密码（GUI 可改） |
 | `timeout` | int | `30` | Playwright 页面操作默认超时（秒） |
+| `login_refresh_interval_seconds` | int | `900` | 长时间空闲后再次查询前主动探测/刷新登录态的间隔；远端 Cookie 过期时仍需重新登录 |
 | `query_interval_seconds` | float | `3` | 条目间间隔，防工单系统限流 |
 | `query_cache_path` | str | `storage/query_cache.json` | 阶段二查询缓存落盘路径 |
 | `query_cache_ttl_days` | int | `7` | 缓存有效期（`0`=永不过期） |
@@ -390,7 +391,7 @@ playwright>=1.40
 9. **阶段一/二入口解耦 (2026-09-10)**: GUI 加运行模式选择（一站式 / 仅阶段一 / 仅阶段二）。WorkerThread.run() 拆为 `_run_stage1()`（邮件解析输出三份产出）/ `_run_stage2()`（读 stage1 输出 xlsx→前置校验→RPA→输出 workorder_check_result.xlsx）/ `_run_all()`（兼容原行为）。阶段二模式隐藏时间范围/邮箱导入等控件，新增"选择阶段一输出文件"按钮；session_state 持久化 mode + stage2_input_path
 10. **阶段二断点续查 + 请求间隔 (2026-09-10)**: `WorkOrderChecker.search_one` 加 `query_cache.json` 缓存（按 代理-公司-项目 三联键），`storage/query_cache.json` 落盘，TTL 默认 7 天（`query_cache_ttl_days`），启动时命中直接复用不再走 RPA。`search_batch` 加条目间间隔 `query_interval_seconds`（默认 3s，防工单系统限流）+ `max_total_seconds` 总超时强制终止（剩余条数下次续跑）
 11. **阶段二前置校验 (2026-09-10)**: `WorkOrderChecker.preprocess_rows()` 静态方法：①跳过「代理空 且 置信度=需人工确认」的条目（输出告警，不查 RPA）；②按 (公司,项目) 三联键去重（重复条目合并查询，节省 RPA 时间）。跳过的条目录入 workorder_check_result.xlsx 的"跳过后说明"列
-12. **输出文件命名与分类 (2026-09-10)**: 默认将阶段一结果写入 `output/stage1_email/`，阶段二结果写入 `output/stage2_workorder/`，工作台导出写入 `output/manual_review/`；`output/diagnostics/` 作为探测文件和调试截图的统一预留目录。每类仍保留稳定名和时序副本，阶段二候选列表会递归扫描这些目录；旧版直接放在 `output/` 根目录的文件仍兼容读取。
+12. **输出文件命名与分类 (2026-09-10)**: 默认将阶段一结果写入 `output/stage1_email/`，阶段二结果写入 `output/stage2_workorder/`，工作台导出写入 `output/manual_review/`；`output/diagnostics/` 作为探测文件和调试截图的统一预留目录。每类仍保留稳定名和时序副本，阶段二候选列表会递归扫描这些目录；旧版直接放在 `output/` 根目录的文件仍兼容读取。阶段一待查/复查表预留 `修改明细`、`新增明细` 两张审计表，工作台导出时写入实际人工变更内容。
 
 ## 测试
 

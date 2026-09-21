@@ -228,6 +228,28 @@ class ExcelWriter:
             return ts
         return stable
 
+    @staticmethod
+    def _add_change_tracking_sheets(wb) -> None:
+        """为阶段一文件预留人工变更台账；工作台导出时会写入实际内容。"""
+        modified = wb.create_sheet("修改明细")
+        modified.append([
+            "邮件编号", "明细编号", "修改时间", "修改字段", "修改前", "修改后", "修改原因", "操作来源",
+        ])
+        added = wb.create_sheet("新增明细")
+        added.append([
+            "邮件编号", "明细编号", "新增时间", "代理", "客户公司", "国家", "服务项目", "具体业务", "新增原因", "操作来源",
+        ])
+        for sheet in (modified, added):
+            for cell in sheet[1]:
+                cell.fill = COLOR_HEADER_FILL
+                cell.font = COLOR_HEADER_FONT
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.border = THIN_BORDER
+            for column in sheet.columns:
+                sheet.column_dimensions[get_column_letter(column[0].column)].width = max(16, min(36, len(str(column[0].value or "")) + 8))
+            sheet.freeze_panes = "A2"
+            sheet.auto_filter.ref = sheet.dimensions
+
     def write_stage1_outputs(self, all_rows: List[Dict], filtered_mails: List[Dict]) -> tuple:
         """
         阶段一输出三份:
@@ -443,6 +465,7 @@ class ExcelWriter:
         for idx, width in enumerate(col_widths, 1):
             ws.column_dimensions[get_column_letter(idx)].width = width
         ws.freeze_panes = "A2"
+        self._add_change_tracking_sheets(wb)
         stable = self._save_pair(wb, stable, ts, "工单待查清单")
         self._log(f"工单待查清单: {stable} ({len(rows)} 行)")
         return stable, ts
@@ -556,6 +579,7 @@ class ExcelWriter:
         for idx, width in enumerate(col_widths, 1):
             ws.column_dimensions[get_column_letter(idx)].width = width
         ws.freeze_panes = "A2"
+        self._add_change_tracking_sheets(wb)
         stable = self._save_pair(wb, stable, ts, "漏单复查清单")
         self._log(f"漏单复查清单: {stable} ({len(rows)} 行)")
         return stable, ts

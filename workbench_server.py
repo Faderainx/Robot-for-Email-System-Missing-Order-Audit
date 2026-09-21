@@ -1797,6 +1797,54 @@ class WorkbenchStore:
                 }
         return {}
 
+    def _effective_fields(self, state: Dict[str, Any], rid: str) -> Dict[str, str]:
+        """返回操作前的当前字段值，用于生成可读的修改明细。"""
+        records = state.get("records") if isinstance(state.get("records"), dict) else {}
+        saved = records.get(rid) if isinstance(records, dict) else {}
+        saved_fields = saved.get("fields") if isinstance(saved, dict) and isinstance(saved.get("fields"), dict) else {}
+        for row in self._raw_records():
+            if _text(row.get("_id")) == rid:
+                base = dict(self._base_fields(row))
+                base.update({key: _text(value) for key, value in saved_fields.items()})
+                return base
+        for bucket in self._added_map(state).values():
+            if not isinstance(bucket, dict):
+                continue
+            for item in bucket.get("items") or []:
+                if isinstance(item, dict) and _text(item.get("id")) == rid:
+                    raw = item.get("fields") if isinstance(item.get("fields"), dict) else {}
+                    base = {key: _text(value) for key, value in raw.items()}
+                    base.update({key: _text(value) for key, value in saved_fields.items()})
+                    return base
+        return {key: _text(value) for key, value in saved_fields.items()}
+
+    @staticmethod
+    def _changed_fields(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
+        changed: Dict[str, Dict[str, str]] = {}
+        for key in ("agent", "company", "country", "program", "request", "customer_code"):
+            old = _text(before.get(key))
+            new = _text(after.get(key))
+            if old != new:
+                changed[key] = {"before": old, "after": new}
+        return changed
+
+    @staticmethod
+    def _append_change(state: Dict[str, Any], event: Dict[str, Any]) -> None:
+        """把修改/新增作为独立增量留痕保存，便于导出而不依赖当前卡片是否仍可见。"""
+        changes = state.setdefault("change_log", [])
+        if not isinstance(changes, list):
+            changes = []
+            state["change_log"] = changes
+        changes.append(event)
+        # 防止长期运行的工作台状态文件无限增长；完整操作记录仍在明细 events/SQLite。
+        if len(changes) > 5000:
+            del changes[:-5000]
+
+    @staticmethod
+    def _change_log(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+        value = state.get("change_log")
+        return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
     def _add_project(self, state: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
         mail_id = _text(payload.get("mail_id"))
         if not mail_id:
@@ -1826,8 +1874,23 @@ class WorkbenchStore:
                 and _text(old.get("country")) == fields["country"]
             ):
                 raise ValueError("该邮件下已存在相同的公司+项目明细，未重复新增")
-        item_id = "add_" + hashlib.sha1(f"{mail_id}|{_now()}|{len(items)}".encode("utf-8")).hexdigest()[:12]
-        items.append({"id": item_id, "fields": fields, "created_at": _now(), "note": _text(payload.get("reason"))})
+        created_at = _now()
+        item_id = "add_" + hashlib.sha1(f"{mail_id}|{created_at}|{len(items)}".encode("utf-8")).hexdigest()[:12]
+        detail_number = _detail_number_from_row({"_id": item_id, "_db_record_key": item_id})
+        mail_number = _text(payload.get("mail_number")) or _mail_number_from_row(mail)
+        note = _text(payload.get("reason"))
+        items.append({"id": item_id, "fields": fields, "created_at": created_at, "note": note})
+        self._append_change(state, {
+            "kind": "added_detail",
+            "at": created_at,
+            "mail_id": mail_id,
+            "mail_number": mail_number,
+            "detail_number": detail_number,
+            "record_id": item_id,
+            "subject": _text(mail.get("subject")),
+            "fields": dict(fields),
+            "reason": note,
+        })
         _save_json(self.state_path, state)
         warning = ""
         known = {p["name"] for p in load_project_names()}
@@ -1836,6 +1899,10 @@ class WorkbenchStore:
         return {
             "ok": True,
             "record_id": item_id,
+            "mail_number": mail_number,
+            "detail_number": detail_number,
+            "change_type": "added_detail",
+            "fields": dict(fields),
             "message": f"已新增项目：{fields['company'] or fields['program']}",
             "warning": warning,
         }
@@ -2228,6 +2295,7 @@ class WorkbenchStore:
     def action(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         rid = _text(payload.get("record_id"))
         action = _text(payload.get("action"))
+        request_id = _text(payload.get("_request_id") or payload.get("request_id"))
         allowed = {
             "edit", "confirm", "confirm_detail", "return", "needs_info", "agent_confirm", "reset",
             "add_project", "delete_project", "bulk_confirm", "move_to_filtered",
@@ -2243,32 +2311,57 @@ class WorkbenchStore:
             raise ValueError("无效的工作台操作")
         with self._lock:
             state = self._state()
+            request_results = state.get("request_results") if isinstance(state.get("request_results"), dict) else {}
+            cached_result = request_results.get(request_id) if request_id else None
+            if isinstance(cached_result, dict):
+                return cached_result
+
+            def finish(result: Dict[str, Any]) -> Dict[str, Any]:
+                completed = self._finish_action(payload, result)
+                if request_id and completed.get("ok"):
+                    latest = self._state()
+                    saved = latest.setdefault("request_results", {})
+                    if not isinstance(saved, dict):
+                        saved = {}
+                        latest["request_results"] = saved
+                    saved[request_id] = completed
+                    if len(saved) > 500:
+                        for old_key in list(saved)[:-500]:
+                            saved.pop(old_key, None)
+                    _save_json(self.state_path, latest)
+                return completed
+
             if action == "add_project":
-                return self._finish_action(payload, self._add_project(state, payload))
+                return finish(self._add_project(state, payload))
             if action == "delete_project":
-                return self._finish_action(payload, self._delete_project(state, rid))
+                return finish(self._delete_project(state, rid))
             if action == "bulk_confirm":
-                return self._finish_action(payload, self._bulk_confirm(state, payload))
+                return finish(self._bulk_confirm(state, payload))
             if action == "bulk_filter":
-                return self._finish_action(payload, self._bulk_filter(state, payload))
+                return finish(self._bulk_filter(state, payload))
             if action == "bulk_restore":
-                return self._finish_action(payload, self._bulk_restore(state, payload))
+                return finish(self._bulk_restore(state, payload))
             if action == "manual_workorder_result":
-                return self._finish_action(payload, self._manual_workorder_result(state, payload))
+                return finish(self._manual_workorder_result(state, payload))
             if action == "queue_workorder_retry":
-                return self._finish_action(payload, self._queue_workorder_retry(state, payload))
+                return finish(self._queue_workorder_retry(state, payload))
             if action == "move_to_filtered":
-                return self._finish_action(payload, self._move_mail_route(state, payload, "filtered"))
+                return finish(self._move_mail_route(state, payload, "filtered"))
             if action == "move_to_review":
-                return self._finish_action(payload, self._move_mail_route(state, payload, "review"))
+                return finish(self._move_mail_route(state, payload, "review"))
             records = state.setdefault("records", {})
             entry = records.setdefault(rid, {"fields": {}, "events": []})
             if not isinstance(entry.get("events"), list):
                 entry["events"] = []
             reason = _text(payload.get("reason"))
+            before_fields = self._effective_fields(state, rid)
+            changed_fields: Dict[str, Dict[str, str]] = {}
             if action == "edit":
                 fields = payload.get("fields") or {}
                 allowed = {"agent", "company", "country", "program", "request"}
+                after_fields = dict(before_fields)
+                after_fields.update({k: _text(v) for k, v in fields.items() if k in allowed})
+                changed_fields = self._changed_fields(before_fields, after_fields)
                 entry.setdefault("fields", {}).update({k: _text(v) for k, v in fields.items() if k in allowed})
                 entry["status"] = "review"
                 label = "人工修正字段"
@@ -2283,14 +2376,29 @@ class WorkbenchStore:
                 label = "标记待补资料"
             elif action == "agent_confirm":
                 fields = payload.get("fields") or {}
+                after_fields = dict(before_fields)
                 if _text(fields.get("agent")):
                     entry.setdefault("fields", {})["agent"] = _text(fields["agent"])
+                    after_fields["agent"] = _text(fields["agent"])
+                changed_fields = self._changed_fields(before_fields, after_fields)
                 entry["status"] = "ready" if _text(fields.get("agent")) else "review"
                 label = "确认代理归属"
             else:
                 records.pop(rid, None)
                 _save_json(self.state_path, state)
-                return self._finish_action(payload, {"ok": True, "message": "已撤销当前人工复核状态"})
+                return finish({"ok": True, "message": "已撤销当前人工复核状态"})
+            if changed_fields:
+                self._append_change(state, {
+                    "kind": "modified_detail",
+                    "at": _now(),
+                    "mail_id": _text(payload.get("mail_id")),
+                    "mail_number": _text(payload.get("mail_number")),
+                    "detail_number": _text(payload.get("detail_number")) or _detail_number_from_row({"_id": rid}),
+                    "record_id": rid,
+                    "subject": _text(payload.get("subject")),
+                    "fields": changed_fields,
+                    "reason": reason,
+                })
             entry["events"].append({
                 "at": _now(),
                 "action": action,
@@ -2298,10 +2406,15 @@ class WorkbenchStore:
                 "reason": reason,
                 "mail_number": _text(payload.get("mail_number")),
                 "detail_number": _text(payload.get("detail_number")),
+                "change_type": "modified_detail" if changed_fields else "",
+                "changed_fields": changed_fields,
             })
             entry["updated_at"] = _now()
             _save_json(self.state_path, state)
-        return self._finish_action(payload, {"ok": True, "message": label})
+            result = {"ok": True, "message": label}
+            if changed_fields:
+                result.update({"change_type": "modified_detail", "changed_fields": changed_fields})
+            return finish(result)
 
     def attachment_bytes(self, mail_id: str, name: str = "", token: str = "") -> Tuple[bytes, str, str, str]:
         """返回原始附件；原始文件缺失时返回由结构化证据重建的 xlsx 预览。
@@ -2469,6 +2582,58 @@ class WorkbenchStore:
                         info.get("at", ""),
                     ])
                 del_ws.freeze_panes = "A2"
+            # 变更单独拆表：主表保留当前最终值，下面两张表记录人工“改了什么”
+            # 和“新增了什么”，避免操作人员只能从整行前后对比中猜差异。
+            change_log = self._change_log(self._state())
+            field_labels = {
+                "agent": "代理", "company": "客户公司", "country": "国家",
+                "program": "服务项目", "request": "具体业务", "customer_code": "客户编号",
+            }
+            modified_ws = wb.create_sheet("修改明细")
+            modified_ws.append([
+                "邮件编号", "明细编号", "修改时间", "邮件主题", "修改字段",
+                "修改前", "修改后", "修改原因", "来源",
+            ])
+            added_ws = wb.create_sheet("新增明细")
+            added_ws.append([
+                "邮件编号", "明细编号", "新增时间", "邮件主题", "代理",
+                "客户公司", "国家", "服务项目", "具体业务", "新增原因", "来源",
+            ])
+            for sheet in (modified_ws, added_ws):
+                for cell in sheet[1]:
+                    cell.font = Font(color="FFFFFF", bold=True)
+                    cell.fill = PatternFill("solid", fgColor="0F766E")
+                sheet.freeze_panes = "A2"
+                sheet.auto_filter.ref = sheet.dimensions
+            for change in change_log:
+                kind = _text(change.get("kind"))
+                mail_number = _text(change.get("mail_number"))
+                detail_number = _text(change.get("detail_number"))
+                at = _text(change.get("at"))
+                subject = _text(change.get("subject"))
+                reason = _text(change.get("reason"))
+                if kind == "modified_detail":
+                    fields = change.get("fields") if isinstance(change.get("fields"), dict) else {}
+                    for key, values in fields.items():
+                        values = values if isinstance(values, dict) else {}
+                        modified_ws.append([
+                            mail_number, detail_number, at, subject,
+                            field_labels.get(key, key), _text(values.get("before")),
+                            _text(values.get("after")), reason, "人工复核工作台",
+                        ])
+                elif kind == "added_detail":
+                    fields = change.get("fields") if isinstance(change.get("fields"), dict) else {}
+                    added_ws.append([
+                        mail_number, detail_number, at, subject,
+                        _text(fields.get("agent")), _text(fields.get("company")),
+                        _text(fields.get("country")), _text(fields.get("program")),
+                        _text(fields.get("request")), reason, "人工复核工作台",
+                    ])
+            for sheet in (modified_ws, added_ws):
+                for column in sheet.columns:
+                    values = [_text(cell.value) for cell in column]
+                    width = min(50, max(14, max((len(value) for value in values), default=0) + 2))
+                    sheet.column_dimensions[get_column_letter(column[0].column)].width = width
             wb.save(out)
             return out
 
@@ -2490,7 +2655,11 @@ class _Handler(BaseHTTPRequestHandler):
         if self.headers.get("Origin") == "null":
             self.send_header("Access-Control-Allow-Origin", "null")
         self.end_headers()
-        self.wfile.write(raw)
+        try:
+            self.wfile.write(raw)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            # 浏览器刷新/超时后主动断开连接不应让服务线程留下异常噪声。
+            pass
 
     def _send_binary(self, payload: bytes, filename: str, content_type: str, source: str = "") -> None:
         self.send_response(200)
@@ -2506,7 +2675,10 @@ class _Handler(BaseHTTPRequestHandler):
         if self.headers.get("Origin") == "null":
             self.send_header("Access-Control-Allow-Origin", "null")
         self.end_headers()
-        self.wfile.write(payload)
+        try:
+            self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
     def do_OPTIONS(self) -> None:  # noqa: N802
         if self.headers.get("Origin") == "null":
@@ -2572,6 +2744,9 @@ class _Handler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeDecodeError):
             self._send({"ok": False, "error": "请求不是有效 JSON"}, 400)
             return
+        request_id = _text(self.headers.get("X-ECOPV-Request-ID"))
+        if request_id and isinstance(payload, dict):
+            payload["_request_id"] = request_id
         try:
             if parsed.path == "/api/action":
                 self._send(self._store().action(payload))

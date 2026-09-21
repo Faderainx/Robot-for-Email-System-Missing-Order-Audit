@@ -149,21 +149,68 @@
 <datalist id="project-options"></datalist>
 <script>
   const API_BASE=location.protocol==='file:'?'http://127.0.0.1:8765':'';
-  const app={data:null,view:'inbox',filter:'all',search:'',dateStart:'',dateEnd:'',mailId:null,detailId:null,tab:'details',highlightField:null,detailOrder:{},selectedMailIds:new Set(),stateFromCache:false};
+  const app={data:null,view:'inbox',filter:'all',search:'',dateStart:'',dateEnd:'',mailId:null,detailId:null,tab:'details',highlightField:null,detailOrder:{},selectedMailIds:new Set(),stateFromCache:false,serverOffline:false};
   const $=s=>document.querySelector(s); const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const statusLabel=s=>({review:'待人工复核',ready:'待确认',confirmed:'已完成',returned:'已退回',needs_info:'待补资料'}[s]||s||'未判定');
   const statusClass=s=>s||'review';
   function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600)}
-  async function api(url,opt){const r=await fetch(API_BASE+url,opt);const j=await r.json();if(!j.ok)throw Error(j.error||'操作失败');return j}
+  const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+  function newRequestId(){try{return crypto.randomUUID()}catch(_){return `req_${Date.now()}_${Math.random().toString(16).slice(2)}`}}
+  async function api(url,opt={},settings={}){
+    const method=String(opt.method||'GET').toUpperCase();
+    const headers=new Headers(opt.headers||{});
+    let body=opt.body;
+    let requestId='';
+    if(method!=='GET'){
+      let payload={};
+      try{payload=body?JSON.parse(body):{}}catch(_){payload={}}
+      if(!payload||typeof payload!=='object'||Array.isArray(payload))payload={};
+      requestId=String(payload.request_id||newRequestId());payload.request_id=requestId;
+      body=JSON.stringify(payload);headers.set('Content-Type','application/json');headers.set('X-ECOPV-Request-ID',requestId);
+    }
+    const attempts=Math.max(1,Number(settings.retries??(method==='GET'?3:2))+1);
+    const timeoutMs=Math.max(3000,Number(settings.timeoutMs??(url==='/api/state'?60000:20000)));
+    let lastError=new Error('请求失败');
+    for(let attempt=0;attempt<attempts;attempt++){
+      const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),timeoutMs);
+      try{
+        const request={...opt,method,headers,body,signal:controller.signal,cache:'no-store'};
+        const response=await fetch(API_BASE+url,request);const text=await response.text();
+        let data;try{data=text?JSON.parse(text):{}}catch(_){throw Error(`服务返回无效数据（HTTP ${response.status}）`)}
+        if(!response.ok)throw Error(data.error||`服务请求失败（HTTP ${response.status}）`);
+        if(!data.ok)throw Error(data.error||'操作失败');
+        return data;
+      }catch(error){
+        lastError=error?.name==='AbortError'?Error(`请求超时（${Math.round(timeoutMs/1000)}秒）`):error;
+        if(attempt+1<attempts)await sleep(350*(attempt+1));
+      }finally{clearTimeout(timer)}
+    }
+    throw lastError;
+  }
+  function normalizeState(data){
+    if(!data||typeof data!=='object')return null;
+    const mails=Array.isArray(data.mails)?data.mails:[],filtered=Array.isArray(data.filtered_mails)?data.filtered_mails:[];
+    const details=mails.flatMap(m=>Array.isArray(m?.details)?m.details:[]);
+    const counts={...(data.counts||{})};
+    if(counts.mails==null)counts.mails=mails.length;if(counts.details==null)counts.details=details.length;
+    if(counts.review==null)counts.review=details.filter(d=>d?.status==='review').length;
+    if(counts.confirmed==null)counts.confirmed=details.filter(d=>d?.status==='confirmed').length;
+    if(counts.filtered==null)counts.filtered=filtered.length;
+    return {...data,mails,filtered_mails:filtered,missing_mails:Array.isArray(data.missing_mails)?data.missing_mails:[],counts};
+  }
+  function readCachedState(){try{return normalizeState(JSON.parse(localStorage.getItem('ecopv-workbench-state-v3')||'null')?.data)}catch(_){return null}}
   async function load(){
     try{const ui=JSON.parse(localStorage.getItem('ecopv-workbench-ui-v1')||'{}');if(typeof ui.dateStart==='string')app.dateStart=ui.dateStart;if(typeof ui.dateEnd==='string')app.dateEnd=ui.dateEnd}catch(_){/* 忽略损坏的界面缓存 */}
     try{
-      app.data=await api('/api/state');app.stateFromCache=false;
-      try{localStorage.setItem('ecopv-workbench-state-v3',JSON.stringify({saved_at:new Date().toISOString(),data:app.data}))}catch(_){/* 缓存不可写不影响工作台 */}
-      render();
+      const live=normalizeState(await api('/api/state',{method:'GET'},{retries:3,timeoutMs:60000}));const cached=readCachedState();
+      const liveMails=Array.isArray(live?.mails)?live.mails:[];const liveFiltered=Array.isArray(live?.filtered_mails)?live.filtered_mails:[];
+      // 服务刚启动、数据库仍在恢复或路径暂时失效时，禁止用空快照覆盖上一次可用数据。
+      const liveIsSuspicious=!Array.isArray(live?.mails)||(!liveMails.length&&!liveFiltered.length&&((cached?.mails?.length||0)+(cached?.filtered_mails?.length||0)>0));
+      if(liveIsSuspicious&&cached?.mails){app.data=cached;app.stateFromCache=true;app.serverOffline=false;toast('服务正在恢复，暂时保留上一次完整数据')}else{app.data=live;app.stateFromCache=false;app.serverOffline=false;try{localStorage.setItem('ecopv-workbench-state-v3',JSON.stringify({saved_at:new Date().toISOString(),data:app.data}))}catch(_){/* 缓存不可写不影响工作台 */}}
+      try{render()}catch(renderError){if(cached?.mails&&cached.mails.length){app.data=cached;app.stateFromCache=true;app.serverOffline=true;render();toast('当前状态格式异常，已回退到最近缓存')}else{throw renderError}}
     }catch(e){
-      let cached=null;try{cached=JSON.parse(localStorage.getItem('ecopv-workbench-state-v3')||'null')?.data}catch(_){cached=null}
-      if(cached?.mails){app.data=cached;app.stateFromCache=true;render();toast('服务暂时不可用，已显示本机缓存；恢复服务后请刷新')}else{
+      const cached=readCachedState();
+      if(cached?.mails||app.data?.mails){if(!app.data?.mails)app.data=cached;app.stateFromCache=true;app.serverOffline=true;render();toast('服务暂时不可用，已显示最近缓存；恢复后会自动重试')}else{
         const hint=location.protocol==='file:'?'请不要直接双击 HTML 文件。先运行项目目录中的“启动人工复核工作台.bat”，或从原 GUI 点击“打开人工复核工作台”。':'请确认工作台服务仍在运行。';$('#detail').innerHTML='<div class="empty">工作台读取失败：'+esc(e.message)+'<br><br>'+esc(hint)+'</div>';toast('无法连接本机工作台服务')
       }
     }
@@ -214,7 +261,7 @@
   const _renderEvidenceBase=renderEvidence;renderEvidence=function(){_renderEvidenceBase();if(app.view==='filtered')return;const d=currentDetail(),s=d?.semantic||{};if(!s.status)return;const card=document.querySelector('#evidence .ev-card');if(!card)return;const extra=[s.issue_codes?`<div class="ev-line"><span>问题编号：</span>${esc(s.issue_codes)}</div>`:'',s.evidence?`<div class="ev-line"><span>证据：</span>${esc(s.evidence)}</div>`:'',s.current_values?`<div class="ev-line"><span>当前值：</span>${esc(s.current_values)}</div>`:'',s.suggested_values?`<div class="ev-line"><span>建议值：</span>${esc(s.suggested_values)}</div>`:''].join('');if(extra)card.insertAdjacentHTML('beforeend',extra)}
   function render(){if(!app.data)return;renderStats();renderProjectOptions();$('#source-path').textContent=app.view==='filtered'?'来源：filtered_mail_record.xlsx':((app.data.paths?.primary||'').split('\\').pop()||'未找到阶段一输出');$('#view-banner').innerHTML=app.view==='filtered'?'<b>工作方式：</b>阶段一读取全量邮件后，将被规则或意图识别过滤的邮件单独保留，供人工追溯。':'<b>工作方式：</b>系统先读取阶段一输出并展示证据，人工确认后才进入后续工单比对。';const source=app.view==='filtered'?filteredMails():(app.data.mails||[]);if(!app.mailId||!source.some(m=>m.id===app.mailId)){app.mailId=source[0]?.id||null;app.detailId=app.view==='filtered'?null:source[0]?.details[0]?.id}renderQueue();renderDetail();renderEvidence()}
   async function bulkConfirm(){const ids=[...app.selectedMailIds];if(!ids.length||app.view==='filtered')return;if(!confirm(`确定批量确认${ids.length}封邮件吗？仅字段完整且没有待复核明细的邮件会被确认。`))return;const mailNumbers=Object.fromEntries(ids.map(id=>{const m=(app.data?.mails||[]).find(x=>x.id===id);return [id,m?.mail_number||'']}));try{const j=await api('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'bulk_confirm',mail_ids:ids,mail_numbers:mailNumbers,reason:'批量人工确认：邮件字段已核对'})});app.selectedMailIds.clear();const skipped=j.skipped_count?`，跳过${j.skipped_count}封未解决邮件`:'';toast(`${j.message}${skipped}`);await load()}catch(e){toast(e.message)}}
-  async function doAction(action,fields={},reason=''){const m=currentMail(),d=currentDetail();if(!d)return;try{await api('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,record_id:d.id,mail_id:m?.id,mail_number:m?.mail_number,detail_number:d.detail_number,fields,reason})});toast('操作已保存');await load()}catch(e){toast(e.message)}}
+  async function doAction(action,fields={},reason=''){const m=currentMail(),d=currentDetail();if(!d)return;try{await api('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,record_id:d.id,mail_id:m?.id,mail_number:m?.mail_number,detail_number:d.detail_number,subject:m?.subject,fields,reason})});toast('操作已保存');await load()}catch(e){toast(e.message)}}
   async function addProject(fields,note){const m=currentMail();if(!m)return;try{const j=await api('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add_project',mail_id:m.id,mail_number:m.mail_number,mail:{sender:m.sender,recipient:m.recipient,date:m.date,subject:m.subject,body:m.body,attachments:m.attachments},fields,reason:note})});if(j.record_id)app.detailId=j.record_id;toast(j.message+(j.warning?'｜'+j.warning:''));await load()}catch(e){toast(e.message)}}
   async function deleteProject(){const m=currentMail(),d=currentDetail();if(!d)return;try{const j=await api('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'delete_project',record_id:d.id,mail_id:m?.id,mail_number:m?.mail_number,detail_number:d.detail_number})});app.detailId=null;toast(j.message);await load()}catch(e){toast(e.message)}}
   function renderProjectOptions(){const list=app.data?.projects||[];$('#project-options').innerHTML=list.map(p=>`<option value="${esc(p.name)}">${esc([p.number,p.country,p.business].filter(Boolean).join(' · '))}</option>`).join('')}
@@ -271,6 +318,14 @@
     node.classList.remove('ready','confirmed','review');
     if(h.enabled){node.classList.add('confirmed');node.textContent=`历史留痕已启用 · 已完成${h.completed_count||0} / 未完成${h.unfinished_count||0}`}
     else{node.classList.add('ready');node.textContent='测试会话 · 不写正式历史'}
+  }
+  let healthTimer=null;
+  function startHealthMonitor(){
+    if(healthTimer)clearInterval(healthTimer);
+    healthTimer=setInterval(async()=>{
+      try{await api('/api/health',{method:'GET'},{retries:1,timeoutMs:8000});if(app.serverOffline){app.serverOffline=false;toast('工作台服务已恢复，正在刷新数据');await load()}}
+      catch(_){app.serverOffline=true;setHistoryState()}
+    },60000);
   }
   renderBulkButton=function(){
     const valid=new Set(queueMails().map(m=>m.id));
@@ -679,6 +734,8 @@
   }
   const _renderDetailWithAttachmentLinks=renderDetail;
   renderDetail=function(){_renderDetailWithAttachmentLinks();enhanceRawAttachmentLinks()};
+  window.addEventListener('online',()=>load());
+  startHealthMonitor();
   load();
 </script>
 </body>
