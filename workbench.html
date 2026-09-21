@@ -107,7 +107,7 @@
     .splitter:hover,.splitter:focus{background:#d9ece8;outline:none}.splitter.dragging{background:#abd5ca}
     .global-date-range{display:flex;align-items:center;gap:5px;white-space:nowrap;color:var(--muted);font-size:11px;border:1px solid var(--line);border-radius:7px;padding:4px 6px;background:#fbfcfc}
     .global-date-range label{font-weight:600;color:var(--ink)}.global-date-range input{width:122px;border:1px solid var(--line);border-radius:5px;padding:5px 6px;color:var(--ink);font:inherit;background:#fff}.global-date-range .btn{padding:5px 8px;font-size:11px}
-    .queue-tools .date-tools{display:none}.evidence-hit{scroll-margin-block:45%}
+    .queue-tools .date-tools{display:none}.evidence-hit{scroll-margin-block:45%}.evidence-match-summary{margin:-4px 0 11px;padding:7px 10px;border:1px solid #dbe9e8;border-radius:6px;background:#f4faf8;color:#517078;font-size:11px;line-height:1.5}.evidence-match-summary b{color:var(--ink)}
     @media(max-width:1200px) and (min-width:781px){.work{grid-template-columns:minmax(220px,var(--queue-w)) 8px minmax(300px,1fr) 8px minmax(320px,var(--evidence-w))!important}}
     @media(max-width:780px){.global-date-range{position:absolute;left:16px;right:16px;top:68px;z-index:5;justify-content:center}.top{position:relative}.work{display:flex!important;gap:0!important}.splitter{display:none}.work>.queue,.work>.detail,.work>.evidence{width:100%;flex:0 0 100%;grid-column:auto!important;grid-row:auto!important}}
   </style>
@@ -432,6 +432,49 @@
     });
     return marked+esc(raw.slice(cursor));
   }
+  function normalizeAttachmentLabel(value){
+    let label=String(value??'').replace(/&nbsp;/gi,' ').replace(/\s+/g,' ').trim();
+    if(!label)return '';
+    // 旧阶段一数据有“文件名+文件名”的重复写法。展示层只压缩
+    // 完全重复的后缀，不改动真正不同的两个附件名称。
+    for(let i=0;i<3;i++){
+      const extRepeat=label.match(/^(.+?\.[A-Za-z0-9]{1,8})(?:\1)+$/i);
+      if(extRepeat){label=extRepeat[1];continue}
+      if(label.length%2===0){
+        const half=label.length/2;
+        if(label.slice(0,half)===label.slice(half)){label=label.slice(0,half);continue}
+      }
+      break;
+    }
+    return label;
+  }
+  function attachmentNames(m){
+    const raw=String(m?.attachments||'').split(/[；;\r\n]+/).map(normalizeAttachmentLabel).filter(Boolean);
+    const indexed=(Array.isArray(m?.attachment_files)?m.attachment_files:[]).map(item=>normalizeAttachmentLabel(item?.filename||'')).filter(Boolean);
+    const result=[];const seen=new Set();
+    for(const name of [...raw,...indexed]){
+      const key=name.toLowerCase();
+      if(!seen.has(key)){seen.add(key);result.push(name)}
+    }
+    return result;
+  }
+  function countEvidenceHits(value,needle){
+    const raw=String(value??'');
+    const needles=(Array.isArray(needle)?needle:[needle]).map(x=>String(x??'').replace(/&nbsp;/gi,' ').replace(/\s+/g,' ').trim()).filter(Boolean).sort((a,b)=>b.length-a.length);
+    if(!raw||!needles.length)return 0;
+    const re=new RegExp(needles.map(escapeRegExp).join('|'),'gi');
+    return [...raw.matchAll(re)].length;
+  }
+  function countAttachmentEvidenceHits(m,d,needles){
+    let count=0;
+    for(const att of attachmentEvidenceFor(m,d)){
+      const sheets=Array.isArray(att.sheets)?att.sheets:[];
+      if(sheets.length){
+        for(const sheet of sheets)for(const row of (sheet.rows||[]))for(const cell of (row.cells||[]))count+=countEvidenceHits(cell,needles);
+      }else count+=countEvidenceHits(att.text,needles);
+    }
+    return count;
+  }
   function attachmentEvidenceFor(m,d){
     const direct=Array.isArray(d?.attachment_evidence)?d.attachment_evidence:[];
     if(direct.length)return direct;
@@ -446,10 +489,10 @@
     return merged;
   }
   function attachmentChip(m,name,needle='',active=false){
-    const label=String(name||'附件');
+    const label=normalizeAttachmentLabel(name)||'附件';
     const text=highlightEvidence(label,needle,active);
     const files=Array.isArray(m?.attachment_files)?m.attachment_files:[];
-    const file=files.find(item=>String(item?.filename||'').split(/[\\/]/).pop().toLowerCase()===label.split(/[\\/]/).pop().toLowerCase());
+    const file=files.find(item=>normalizeAttachmentLabel(String(item?.filename||'').split(/[\\/]/).pop()).toLowerCase()===label.split(/[\\/]/).pop().toLowerCase());
     const params=`mail_id=${encodeURIComponent(m?.id||'')}&name=${encodeURIComponent(label)}${file?.token?`&token=${encodeURIComponent(file.token)}`:''}`;
     // 原始附件存在时下载原件；旧邮件只有结构化证据时，服务端生成可打开的 xlsx 预览。
     const canPreview=file||/\.(xlsx?|csv)$/i.test(label)&&attachmentEvidenceFor(m,null).some(item=>String(item.filename||'').toLowerCase()===label.toLowerCase());
@@ -575,7 +618,10 @@
     const value=selectedFieldValue(d,field);
     const title=m.subject||'无主题';
     const body=m.raw_body||m.body||'（正文摘要为空）';
-    const attachments=(m.attachments||'').split(/[；;]+/).map(x=>x.trim()).filter(Boolean);
+    const attachments=attachmentNames(m);
+    const needles=evidenceNeedles(field,value);
+    const fieldLabel=(d?.evidence||[]).find(x=>x.field===field)?.label||field||'';
+    const sourceSummary=field&&value?`<div class="evidence-match-summary">当前字段：<b>${esc(fieldLabel)}</b>　标题 ${countEvidenceHits(title,needles)} 处 · 正文 ${countEvidenceHits(body,needles)} 处 · 附件名称 ${attachments.reduce((n,name)=>n+countEvidenceHits(name,needles),0)} 处 · 附件内容 ${countAttachmentEvidenceHits(m,d,needles)} 处</div>`:'';
     const detailRows=d?[['代理','agent'],['公司','company'],['国家','country'],['项目','program'],['具体业务','request'],['附件表','attachment_record_count']].map(([label,key])=>{const shown=selectedFieldValue(d,key)||'待确认';return `<div class="ev-line"><span>${label}：</span>${key===field?`<b class="evidence-hit">${esc(shown)}</b>`:esc(shown)}</div>`}).join(''):'';
     const semantic=d?.semantic||{};
     const semanticHtml=semantic.status?`<div class="ev-card"><div class="ev-label">LLM语义校验 <span class="pill ${semantic.status==='valid'?'confirmed':'review'}">${esc(semantic.status)}</span></div><div class="ev-line"><span>问题字段：</span>${esc(semantic.issues||'无')}</div><div class="ev-line"><span>建议：</span>${esc(semantic.suggestion||'保留程序原值')}</div><div class="ev-line"><span>理由：</span>${esc(semantic.reason||'')}</div></div>`:'';
@@ -584,7 +630,7 @@
       return `<div class="ev-card"><div class="ev-label">${esc(item.label)}</div><div class="ev-line"><span>初始提取：</span>${active?highlightEvidence(item.initial,value,true):esc(item.initial||'（空）')}</div><div class="ev-line"><span>当前接受：</span>${active?`<b>${highlightEvidence(item.accepted,value,true)}</b>`:`<b>${esc(item.accepted||'（待确认）')}</b>`}</div><span class="source">来源：${esc(item.source)}</span></div>`;
     }).join('');
     const eventHtml=d?.events?.length?d.events.slice(-4).reverse().map(e=>`<div class="event"><b>${esc(e.label)}</b><br>${esc(e.at)}</div>`).join(''):'<div class="muted" style="font-size:12px">暂无人工操作</div>';
-    box.innerHTML=`<h3>字段证据</h3><div class="evidence-sub">点击右侧业务明细字段后，仅标红该字段在标题、正文、附件名称和当前证据中的对应文本；其他字段保持原样。</div><div class="ev-card"><div class="ev-label">邮件标题</div><div class="ev-line">${highlightEvidence(title,value,Boolean(field&&value))}</div><span class="source">来源：邮件主题</span></div><div class="ev-card"><div class="ev-label">邮件原文</div><div class="evidence-raw">${highlightEvidence(body,value,Boolean(field&&value))}</div><span class="source">来源：邮件正文</span></div><div class="ev-card"><div class="ev-label">附件清单</div><div>${attachments.length?attachments.map(name=>attachmentChip(m,name,value,Boolean(field&&value))).join(''):'<span class="muted">无附件</span>'}</div><span class="source">来源：邮件附件名称</span></div>${renderAttachmentEvidence(m,d,field,value)}${d?`<div class="ev-card"><div class="ev-label">当前业务明细${field?` · 已选${esc((d.evidence||[]).find(x=>x.field===field)?.label||field)}`:''}</div>${detailRows}</div>${renderWeeeAudit(d)}`:''}${semanticHtml}${fieldEvidence}<div class="events"><div class="section-title">最近操作</div>${eventHtml}</div>`;
+    box.innerHTML=`<h3>字段证据</h3><div class="evidence-sub">点击右侧业务明细字段后，只在该字段真实出现的证据来源中标红；标题、正文、附件名称和附件表格分别独立判断，没有出现的来源不会强行标红。</div>${sourceSummary}<div class="ev-card"><div class="ev-label">邮件标题</div><div class="ev-line">${highlightEvidence(title,needles,Boolean(field&&value))}</div><span class="source">来源：邮件主题</span></div><div class="ev-card"><div class="ev-label">邮件原文</div><div class="evidence-raw">${highlightEvidence(body,needles,Boolean(field&&value))}</div><span class="source">来源：邮件正文</span></div><div class="ev-card"><div class="ev-label">附件清单</div><div>${attachments.length?attachments.map(name=>attachmentChip(m,name,needles,Boolean(field&&value))).join(''):'<span class="muted">无附件</span>'}</div><span class="source">来源：邮件附件名称</span></div>${renderAttachmentEvidence(m,d,field,value)}${d?`<div class="ev-card"><div class="ev-label">当前业务明细${field?` · 已选${esc((d.evidence||[]).find(x=>x.field===field)?.label||field)}`:''}</div>${detailRows}</div>${renderWeeeAudit(d)}`:''}${semanticHtml}${fieldEvidence}<div class="events"><div class="section-title">最近操作</div>${eventHtml}</div>`;
   }
   function focusEvidenceHit(){
     const box=$('#evidence');
