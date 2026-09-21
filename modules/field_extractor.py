@@ -259,7 +259,42 @@ class FieldExtractor:
                     llm_projects = llm_result["项目"]
                     llm_project_result = self._match_llm_projects(llm_projects)
                     if missing_project:
+                        # 附件结构化表已经建立了“每行一个主体”的关系时，
+                        # LLM 只是在补充共同的项目，不能用新的 project_result
+                        # 把这些行分组丢掉。旧写法会把两家公司重新压成一条，
+                        # 尤其影响“德国项目每日登记表”这类只有“种类”列、
+                        # 项目从邮件上下文补全的附件。
+                        attachment_groups_before_llm = list(
+                            project_result.get("groups") or []
+                        )
+                        attachment_count_before_llm = project_result.get(
+                            "attachment_record_count"
+                        )
                         project_result = llm_project_result
+                        if attachment_groups_before_llm:
+                            project_result["groups"] = attachment_groups_before_llm
+                            if attachment_count_before_llm:
+                                project_result["attachment_record_count"] = (
+                                    attachment_count_before_llm
+                                )
+                            llm_project_names = [
+                                str(item.get("standard_name") or "").strip()
+                                for item in llm_project_result.get("projects") or []
+                                if str(item.get("standard_name") or "").strip()
+                            ]
+                            # 只有一个共同项目时才安全继承到每条附件记录；
+                            # 多项目无法从“种类”列区分，必须保留人工核对，
+                            # 不能制造公司×项目笛卡尔积。
+                            if len(llm_project_names) == 1:
+                                for group in attachment_groups_before_llm:
+                                    if not group.get("projects"):
+                                        group["projects"] = list(llm_project_names)
+                            project_result["need_review"] = bool(
+                                project_result.get("need_review")
+                            ) or any(
+                                group.get("needs_review")
+                                for group in attachment_groups_before_llm
+                            )
                     else:
                         # 复检只能补漏，不能覆盖规则已经确认的项目。
                         existing = list(project_result.get("projects") or [])
