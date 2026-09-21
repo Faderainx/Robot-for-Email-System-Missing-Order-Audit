@@ -1429,7 +1429,7 @@ class MainWindow(QMainWindow):
         self.input_email_addr = QLineEdit()
         self.input_email_pwd = QLineEdit()
         self.input_email_pwd.setEchoMode(QLineEdit.Password)
-        cred_layout.addRow("阿里邮箱地址:", self.input_email_addr)
+        cred_layout.addRow("阿里邮箱账号:", self.input_email_addr)
         cred_layout.addRow("阿里邮箱密码:", self.input_email_pwd)
 
         # 工单系统
