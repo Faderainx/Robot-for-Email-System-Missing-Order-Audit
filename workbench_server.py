@@ -796,7 +796,14 @@ class WorkbenchStore:
                 return selected
             if stored:
                 return stored
-        return records
+        # 测试/临时会话没有数据库覆盖层，也必须使用与正式工作台相同的
+        # 历史脏值过滤规则，避免测试页面重新显示发件方说明句客户。
+        return [
+            row for row in records
+            if not _is_non_company_customer_value(
+                row.get("客户公司名称") or row.get("客户") or row.get("company")
+            )
+        ]
 
     def _state(self) -> Dict[str, Any]:
         return _load_json(self.state_path)
@@ -867,7 +874,13 @@ class WorkbenchStore:
         attachment_files = _json_list(row.get("附件文件索引"))
         weee_items = _json_list(row.get("德国WEEE品类明细"))
         weee_check = _json_object(row.get("德国WEEE品类核对"))
-        weee_enabled = _text(row.get("德国WEEE专项")) == "是"
+        # 兼容旧阶段一结果：历史行可能因为申请表模板中的“WEEE产品信息”
+        # 被标成专项开启，但当前业务项目实际是“德国包装法”。工作台不应
+        # 在非 WEEE 业务卡上显示 WEEE 品类待核对；以标准化项目字段作排他闸门。
+        weee_enabled = (
+            _text(row.get("德国WEEE专项")) == "是"
+            and bool(re.search(r"WEEE", fields["program"], re.I))
+        )
         if attachment_expected or attachment_output or attachment_check or attachment_source:
             evidence.append({
                 "field": "attachment_record_count",
