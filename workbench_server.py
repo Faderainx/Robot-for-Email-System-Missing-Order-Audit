@@ -354,6 +354,22 @@ def _is_non_company_customer_value(value: Any) -> bool:
     )
     if any(hint in compact for hint in hints):
         return True
+    # 旧版阶段一会把正文引导语中的公司后缀截出来，例如
+    # “以下为广东省方信企业管理集团有限公司……提交……名单”。
+    # 这不是客户主体；重新解析前先从工作台显示层隐藏这类历史脏行，
+    # 但不删除数据库中的原始记录，便于审计追溯。
+    if re.match(r"^(?:以下|下面|下列|现将|本次)(?:为|是)?", text, re.I) and re.search(
+        r"(?:提交|报送|发送|提供|列出|名单|新注册|申请)", text, re.I
+    ):
+        return True
+    # 旧行里通常只剩公司后缀前的截断值（如“以下为某某有限公司”），
+    # 后面的“提交名单”已经不在客户字段中，因此单独按前缀+公司后缀识别。
+    if re.match(r"^(?:以下|下面|下列)(?:为|是)", text, re.I) and re.search(
+        r"(?:有限责任公司|股份有限公司|集团有限公司|有限公司|责任公司|公司|企业)$",
+        text,
+        re.I,
+    ):
+        return True
     if "@" in text or re.search(r"https?://|www\.", text, re.I):
         return True
     if re.fullmatch(r"[+()\-\s\d]{6,}", text):

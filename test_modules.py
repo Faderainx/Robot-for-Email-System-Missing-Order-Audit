@@ -227,6 +227,34 @@ def test_field_extractor():
         print(f"    代理={r.get('代理','')}, 客户={r.get('客户','')}, 项目={r.get('项目','')}")
     
     print(f"  代理查表 ✓, 客户提取 ✓, 项目扫描 ✓")
+
+    # 回归：正文首行“以下为……提交名单”是代理说明，不是第五家客户。
+    bulk_mail = {
+        "sender_email": "unknown@xxx.com",
+        "subject": "方信-2026.08.25 德国包装法注册",
+        "body_text": (
+            "你好\n"
+            "以下为广东省方信企业管理集团有限公司2026.08.25提交德国包装法新注册名单\n"
+            "麻烦尽快处理，尽量在本周内下号\n\n"
+            "FX024-武汉昼梦光年商贸有限公司德国包装法\n"
+            "FX025-汕头市北泓川电子商务有限公司 德国包装法\n"
+            "FX026-汕头市皮可布玩具有限公司 德国包装法\n"
+            "FX027-陕西荣萃电子商务有限责任公司-德国包装法"
+        ),
+        "attachments": [],
+    }
+    bulk_rows = extractor.extract_fields(bulk_mail)
+    bulk_customers = [row.get("客户", "") for row in bulk_rows]
+    expected_customers = [
+        "武汉昼梦光年商贸有限公司",
+        "汕头市北泓川电子商务有限公司",
+        "汕头市皮可布玩具有限公司",
+        "陕西荣萃电子商务有限责任公司",
+    ]
+    if len(bulk_rows) != 4 or set(bulk_customers) != set(expected_customers):
+        print(f"  正文批量名单提取错误: {bulk_customers}")
+        return False
+    print("  正文说明句未被当成客户，FX024-FX027 四家公司提取 ✓")
     return True
 
 # ============================================================

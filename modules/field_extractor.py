@@ -1236,8 +1236,15 @@ class FieldExtractor:
             if not isinstance(raw_group, dict):
                 continue
             group = dict(raw_group)
+            raw_customer = str(group.get("customer", "") or "").strip()
+            # 说明句中的公司后缀可能被正则截成“以下为某某有限公司”。
+            # 这是发件方/代理的引导语，不是客户主体；确定为此类值时直接
+            # 丢弃，避免同一封邮件多出一张假的客户明细。其他不确定候选仍留给人工。
+            if self._customer_noise_reason(raw_customer) == "发件方说明句":
+                self._log(f"忽略发件方说明句中的公司候选: {raw_customer}", "warning")
+                continue
             result = self._sanitize_customer_result({
-                "customer": group.get("customer", ""),
+                "customer": raw_customer,
                 "source": group.get("source", "结构化分组"),
             })
             group["customer"] = result.get("customer", "")
@@ -1365,6 +1372,27 @@ class FieldExtractor:
         )
         if any(hint in compact for hint in hints):
             return "表单字段标签或说明文字"
+        # “以下为/下列为……提交……名单”是代理或发件方对后续名单的
+        # 引导语。公司后缀正则会从整句截出“以下为某某有限公司”，旧逻辑
+        # 因而把代理公司误当客户；按上下文前缀拒绝该候选。
+        if re.match(
+            r"^(?:以下|下面|下列|现将|本次)(?:为|是)?",
+            text,
+            re.I,
+        ) and re.search(
+            r"(?:提交|报送|发送|提供|列出|名单|新注册|申请)",
+            text,
+            re.I,
+        ):
+            return "发件方说明句"
+        # 上一步公司后缀提取后可能只剩“以下为某某有限公司”，提交/名单
+        # 等后文已被截掉；该前缀 + 公司后缀组合仍是确定的说明句候选。
+        if re.match(r"^(?:以下|下面|下列)(?:为|是)", text, re.I) and re.search(
+            r"(?:有限责任公司|股份有限公司|集团有限公司|有限公司|责任公司|公司|企业)$",
+            text,
+            re.I,
+        ):
+            return "发件方说明句"
         if "@" in text or re.search(r"https?://|www\.", text, re.I):
             return "邮箱或链接"
         if re.fullmatch(r"[+()\-\s\d]{6,}", text):
@@ -1428,7 +1456,11 @@ class FieldExtractor:
             line = line.strip()
             if any(kw in line for kw in ["公司", "有限", "科技", "电商", "贸易", "实业"]):
                 # 排除代理名和邮件签名
-                if not self._is_agent_name(line) and len(line) < 50:
+                if (
+                    not self._is_agent_name(line)
+                    and self._customer_noise_reason(line) != "发件方说明句"
+                    and len(line) < 50
+                ):
                     # 清理行内多余内容，并复用统一的拒绝闸门；否则
                     # “1家公司/不含回收公司”会遮住后面真正的主体名称。
                     candidate = self._company_substring(line)
@@ -1801,6 +1833,13 @@ class FieldExtractor:
                 continue
 
             all_companies = self._company_substrings(text)
+            # 说明句中也会出现一个带“公司”后缀的代理/发件方名称，
+            # 例如“以下为广东省方信企业管理集团有限公司……提交……名单”。
+            # 该名称不是客户主体，不能参与批量公司—项目映射。
+            all_companies = [
+                company for company in all_companies
+                if self._customer_noise_reason(company) != "发件方说明句"
+            ]
             global_projects = [
                 p["standard_name"] for p in self._extract_projects_by_rules(text)
             ]
@@ -1810,6 +1849,10 @@ class FieldExtractor:
             local = {}
             for chunk in chunks:
                 chunk_companies = self._company_substrings(chunk)
+                chunk_companies = [
+                    company for company in chunk_companies
+                    if self._customer_noise_reason(company) != "发件方说明句"
+                ]
                 chunk_projects = [
                     p["standard_name"] for p in self._extract_projects_by_rules(chunk)
                 ]
