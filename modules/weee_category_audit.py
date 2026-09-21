@@ -127,8 +127,9 @@ WEEE_CATEGORY_DEFINITIONS = {
     },
 }
 
+_CHINESE_CATEGORY_NUMBERS = {"一": "1", "二": "2", "三": "3", "四": "4", "五": "5", "六": "6"}
 _CATEGORY_LABEL_RE = re.compile(
-    r"(?:第\s*([1-6])\s*类|(?:category|class|klasse)\s*([1-6])|类别\s*([1-6])|分类\s*([1-6]))",
+    r"(?:第\s*([1-6一二三四五六])\s*类|(?:category|class|klasse)\s*([1-6])|类别\s*([1-6一二三四五六])|分类\s*([1-6一二三四五六]))",
     re.I,
 )
 
@@ -160,7 +161,8 @@ def _category_id_from_label(value: Any) -> str:
     match = _CATEGORY_LABEL_RE.search(text)
     if not match:
         return ""
-    return next((group for group in match.groups() if group), "")
+    raw = next((group for group in match.groups() if group), "")
+    return _CHINESE_CATEGORY_NUMBERS.get(raw, raw)
 
 
 def _category_alias_hits(value: Any) -> List[Dict[str, Any]]:
