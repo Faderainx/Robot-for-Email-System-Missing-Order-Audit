@@ -2258,6 +2258,62 @@ def test_workbench_add_delete_project():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_weee_category_extraction_and_confirmation():
+    """德国 WEEE 按品牌/原始品类拆项，并保留人工确认后的分类。"""
+    print("== 德国 WEEE 品牌/品类提取与确认 ==")
+    from pathlib import Path
+    from openpyxl import Workbook
+    from modules.weee_category_audit import classify_weee_product, extract_weee_items
+    import workbench_server as W
+
+    classification = classify_weee_product("热交换设备")
+    check("WEEE 分类表：热交换设备 → 第1类", classification.get("status") == "matched" and classification.get("category_class") == "1", classification)
+
+    attachment = {
+        "filename": "德国WEEE品类表.xlsx",
+        "structured_records": [],
+        "sheets": [{
+            "sheet_name": "Sheet1",
+            "preview_rows": [
+                {"row_number": 1, "cells": ["品牌", "品类"]},
+                {"row_number": 2, "cells": ["FormiPow", "热交换设备"]},
+            ],
+        }],
+    }
+    extracted = extract_weee_items(
+        subject="FormiPow 德国WEEE注册",
+        body="品牌：FormiPow；品类：热交换设备",
+        attachments=[attachment],
+        project="德国WEEE",
+    )
+    check("WEEE 从嵌套 xlsx 预览提取品牌", any(item.get("brand") == "FormiPow" for item in extracted.get("items", [])), extracted)
+    check("WEEE 保留原始品类并映射类别", any(item.get("category") == "热交换设备" and item.get("category_class") == "1" for item in extracted.get("items", [])), extracted)
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        primary = tmp / "to_workorder_list.xlsx"
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "工单待查"
+        ws.append(["发件人邮箱", "发件日期", "邮件主题", "邮件正文原文", "附件名称", "代理", "客户公司名称", "标准化项目名称", "需求", "置信度", "德国WEEE专项", "德国WEEE品类明细", "德国WEEE品类状态"])
+        import json as _json
+        ws.append(["weee@example.com", "2026-09-21 10:00:00", "FormiPow 德国WEEE注册", "品牌：FormiPow；品类：热交换设备", "德国WEEE品类表.xlsx", "代理甲", "WEEE公司", "德国WEEE", "注册", "high", "是", _json.dumps(extracted["items"], ensure_ascii=False), "待工单品类核对"])
+        wb.save(primary)
+        store = W.WorkbenchStore(primary_path=str(primary), review_path=str(tmp / "none.xlsx"), filtered_path=str(tmp / "none_filtered.xlsx"), state_path=str(tmp / "state.json"), test_mode=True)
+        before = store.snapshot()["mails"][0]["details"][0]
+        saved = store.action({
+            "action": "confirm_weee", "record_id": before["id"], "mail_id": store.snapshot()["mails"][0]["id"],
+            "mail_number": before["mail_number"], "detail_number": before["detail_number"],
+            "weee_items": [{**extracted["items"][0], "category_class": "1"}],
+            "reason": "人工核对分类表",
+        })
+        check("WEEE 人工确认动作保存成功", saved.get("ok") is True and saved.get("weee_status") == "confirmed", saved)
+        after = store.snapshot()["mails"][0]["details"][0]
+        check("WEEE 刷新后保留确认状态和分类", after.get("weee", {}).get("confirmed") is True and after.get("weee", {}).get("items", [{}])[0].get("category_class") == "1", after.get("weee"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_workbench_bulk_confirm():
     """批量确认只处理完整邮件，含人工复核明细的邮件必须跳过。"""
     print("== 工作台 批量确认邮件 ==")

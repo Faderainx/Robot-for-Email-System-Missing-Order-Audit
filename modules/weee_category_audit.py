@@ -26,7 +26,7 @@ _CATEGORY_KEYS = (
     "品类", "品類", "类别", "類別", "产品类别", "產品類別", "商品类别",
     "商品類別", "产品分类", "產品分類", "设备类别", "設備類別", "注册类别",
     "注册品类", "申报品类", "申報品類", "category", "product category",
-    "product type", "warengruppe", "produktkategorie",
+    "product type", "product name", "product type/name", "warengruppe", "produktkategorie",
 )
 _WORKORDER_CATEGORY_KEYS = _CATEGORY_KEYS + (
     "品类明细", "品類明細", "类别明细", "類別明細", "分类明细", "分類明細",
@@ -367,6 +367,76 @@ def _dedupe(values: Iterable[str]) -> List[str]:
     return result
 
 
+def _sheet_preview_records(attachment: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """从阶段一保存的 xlsx 预览行恢复 WEEE 品牌/品类记录。
+
+    阶段一的新结构化解析通常已经提供 ``structured_records``，但历史缓存、
+    压缩包内表格和旧版工作簿有时只保留 ``sheets.preview_rows``。这里仅在
+    同一张表中找到品牌列和品类/产品描述列时读取，避免把申请表的普通字段
+    或表格说明文字误当成 WEEE 项目。
+    """
+    records: List[Dict[str, Any]] = []
+    for sheet in attachment.get("sheets") or []:
+        if not isinstance(sheet, dict):
+            continue
+        rows = sheet.get("preview_rows") or sheet.get("rows") or []
+        normalized_rows: List[tuple[int, List[str]]] = []
+        for row in rows:
+            if isinstance(row, dict):
+                row_number = row.get("row_number") or row.get("index") or "?"
+                cells = row.get("cells") or row.get("values") or []
+            elif isinstance(row, (list, tuple)):
+                row_number, cells = "?", row
+            else:
+                continue
+            if not isinstance(cells, (list, tuple)):
+                continue
+            normalized_rows.append((int(row_number) if str(row_number).isdigit() else row_number, [_text(cell) for cell in cells]))
+
+        header_index = -1
+        brand_columns: List[int] = []
+        category_columns: List[int] = []
+        for index, (_row_number, cells) in enumerate(normalized_rows[:60]):
+            brands = [column for column, cell in enumerate(cells) if _is_header_alias(cell, _BRAND_KEYS)]
+            categories = [column for column, cell in enumerate(cells) if _is_header_alias(cell, _CATEGORY_KEYS)]
+            if brands and categories:
+                header_index = index
+                brand_columns = brands
+                category_columns = categories
+                break
+        if header_index < 0:
+            continue
+
+        for row_number, cells in normalized_rows[header_index + 1:]:
+            brands = [_clean_candidate(cells[column]) for column in brand_columns if column < len(cells)]
+            categories = [_clean_candidate(cells[column]) for column in category_columns if column < len(cells)]
+            brands = [value for value in brands if value]
+            categories = [value for value in categories if value]
+            if not brands and not categories:
+                continue
+            records.append({
+                "sheet_name": _text(sheet.get("sheet_name")) or "工作表",
+                "row_number": row_number,
+                "cells": cells[:24],
+                "brand": " | ".join(brands),
+                "category": " | ".join(categories),
+                "raw_text": " | ".join(cell for cell in cells if cell),
+                "record_type": "weee_catalog_preview",
+            })
+    return records
+
+
+def _is_header_alias(value: Any, aliases: Sequence[str]) -> bool:
+    normalized = re.sub(r"\s+", "", _text(value).casefold())
+    if not normalized:
+        return False
+    return any(
+        normalized == re.sub(r"\s+", "", alias.casefold())
+        or re.sub(r"\s+", "", alias.casefold()) in normalized
+        for alias in aliases
+    )
+
+
 def extract_weee_items(
     subject: Any = "",
     body: Any = "",
@@ -388,7 +458,9 @@ def extract_weee_items(
         if not isinstance(attachment, dict):
             continue
         filename = _text(attachment.get("filename")) or "附件"
-        for record in attachment.get("structured_records") or []:
+        attachment_records = list(attachment.get("structured_records") or [])
+        attachment_records.extend(_sheet_preview_records(attachment))
+        for record in attachment_records:
             if not isinstance(record, dict):
                 continue
             brands = _record_values(record, _BRAND_KEYS)
@@ -462,7 +534,9 @@ def extract_weee_items(
     for item in result_items:
         item["evidence"] = "；".join(item.get("evidences") or [])
         # 不覆盖原始品类文字；分类表归类只是一个可追溯的派生字段。
-        category_text = item.get("category") or item.get("brand") or ""
+        # 品牌不能代替品类参与分类。品牌存在而品类为空时必须保持待人工，
+        # 否则会把品牌名中恰好出现的产品词误判成 WEEE 类别。
+        category_text = item.get("category") or ""
         classification = classify_weee_product(category_text)
         item["category_original"] = category_text
         item["category_class"] = classification.get("category_class", "")

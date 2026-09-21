@@ -1120,6 +1120,14 @@ class WorkbenchStore:
         attachment_files = _json_list(row.get("附件文件索引"))
         weee_items = _json_list(row.get("德国WEEE品类明细"))
         weee_check = _json_object(row.get("德国WEEE品类核对"))
+        # WEEE 品牌/品类确认是独立于普通邮件字段的增量状态。人工确认后
+        # 优先使用状态 JSON 中保存的项目快照，不会因刷新阶段一 Excel 把
+        # 已处理的品牌、原始品类或人工映射类别覆盖掉。
+        saved_weee_items = saved.get("weee_items") if isinstance(saved.get("weee_items"), list) else []
+        if saved_weee_items:
+            weee_items = [item for item in saved_weee_items if isinstance(item, dict)]
+        saved_weee_status = _text(saved.get("weee_status"))
+        weee_confirmed = saved_weee_status == "confirmed"
         # 兼容旧阶段一结果：历史行可能因为申请表模板中的“WEEE产品信息”
         # 被标成专项开启，但当前业务项目实际是“德国包装法”。工作台不应
         # 在非 WEEE 业务卡上显示 WEEE 品类待核对；以标准化项目字段作排他闸门。
@@ -1182,7 +1190,10 @@ class WorkbenchStore:
             "weee": {
                 "enabled": weee_enabled,
                 "items": weee_items,
-                "status": _text(row.get("德国WEEE品类状态")) or "待工单核对",
+                "status": "confirmed" if weee_confirmed else (_text(row.get("德国WEEE品类状态")) or "待工单核对"),
+                "confirmed": weee_confirmed,
+                "confirmed_at": _text(saved.get("weee_confirmed_at")),
+                "confirmation_reason": _text(saved.get("weee_confirmation_reason")),
                 "comparison": weee_check,
                 "reason": _text(row.get("德国WEEE专项说明")),
             },
@@ -1667,7 +1678,8 @@ class WorkbenchStore:
                 comparison = _json_object(workorder_row.get("德国WEEE品类核对"))
                 if comparison:
                     weee["comparison"] = comparison
-                weee["status"] = _text(workorder_row.get("德国WEEE品类状态")) or weee.get("status", "待工单核对")
+                if not weee.get("confirmed"):
+                    weee["status"] = _text(workorder_row.get("德国WEEE品类状态")) or weee.get("status", "待工单核对")
                 weee["reason"] = _text(workorder_row.get("德国WEEE专项说明")) or weee.get("reason", "")
                 detail["weee"] = weee
             filtered = _read_sheet(self.filtered_path, "过滤日志", "过滤日志")
@@ -2489,6 +2501,7 @@ class WorkbenchStore:
         request_id = _text(payload.get("_request_id") or payload.get("request_id"))
         allowed = {
             "edit", "confirm", "confirm_detail", "return", "needs_info", "agent_confirm", "reset",
+            "confirm_weee",
             "add_project", "delete_project", "bulk_confirm", "move_to_filtered",
             "move_to_review", "bulk_filter", "bulk_restore",
             "manual_workorder_result", "queue_workorder_retry",
@@ -2559,6 +2572,54 @@ class WorkbenchStore:
             elif action in {"confirm", "confirm_detail"}:
                 entry["status"] = "confirmed"
                 label = "人工确认当前业务" if action == "confirm_detail" else "人工确认整理完成"
+            elif action == "confirm_weee":
+                raw_items = payload.get("weee_items")
+                if not isinstance(raw_items, list):
+                    raise ValueError("德国 WEEE 品牌/品类数据格式不正确")
+                category_names = {
+                    "1": "热交换设备", "2": "屏幕和显示设备", "3": "灯具和光源",
+                    "4": "大型设备", "5": "小型设备", "6": "小型信息和电信设备",
+                }
+                normalized_items: List[Dict[str, Any]] = []
+                for raw_item in raw_items:
+                    if not isinstance(raw_item, dict):
+                        continue
+                    item = dict(raw_item)
+                    item["brand"] = _text(item.get("brand"))
+                    item["category"] = _text(item.get("category") or item.get("category_original"))
+                    item["category_original"] = item["category"]
+                    category_class = _text(item.get("category_class"))
+                    if category_class not in category_names:
+                        category_class = ""
+                    item["category_class"] = category_class
+                    item["category_class_name"] = category_names.get(category_class, "")
+                    # 选择了六类之一即表示操作人员已确认映射；未选择时保留
+                    # 原有自动分类状态，方便后续继续人工核对而不是伪装成匹配。
+                    if category_class:
+                        item["category_class_status"] = "matched"
+                    else:
+                        item["category_class_status"] = _text(item.get("category_class_status")) or "unmatched"
+                    normalized_items.append(item)
+                if not normalized_items:
+                    raise ValueError("没有可保存的德国 WEEE 品牌/品类项目")
+                now = _now()
+                entry["weee_items"] = normalized_items
+                entry["weee_status"] = "confirmed"
+                entry["weee_confirmed_at"] = now
+                entry["weee_confirmation_reason"] = reason or "人工确认德国 WEEE 品牌与品类"
+                label = "确认德国 WEEE 品牌与品类"
+                entry["events"].append({
+                    "at": now,
+                    "action": action,
+                    "label": label,
+                    "reason": reason or "人工确认德国 WEEE 品牌与品类",
+                    "mail_number": _text(payload.get("mail_number")),
+                    "detail_number": _text(payload.get("detail_number")) or _detail_number_from_row({"_id": rid}),
+                    "weee_item_count": len(normalized_items),
+                })
+                entry["updated_at"] = now
+                _save_json(self.state_path, state)
+                return finish({"ok": True, "message": label, "weee_status": "confirmed", "item_count": len(normalized_items)})
             elif action == "return":
                 entry["status"] = "returned"
                 label = "退回复核"

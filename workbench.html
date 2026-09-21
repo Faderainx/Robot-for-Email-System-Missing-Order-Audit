@@ -117,6 +117,24 @@
     @media(max-width:1200px) and (min-width:781px){.work{grid-template-columns:minmax(220px,var(--queue-w)) 8px minmax(300px,1fr) 8px minmax(320px,var(--evidence-w))!important}}
     @media(max-width:780px){.global-date-range{position:absolute;left:16px;right:16px;top:68px;z-index:5;justify-content:center}.top{position:relative}.work{display:flex!important;gap:0!important}.splitter{display:none}.work>.queue,.work>.detail,.work>.evidence{width:100%;flex:0 0 100%;grid-column:auto!important;grid-row:auto!important}}
   </style>
+  <style>
+    .weee-page-note{background:#eef8f5;border:1px solid #cce7dc;color:#276b60;border-radius:8px;padding:10px 12px;font-size:12px;line-height:1.6;margin-bottom:12px}
+    .weee-mail-meta{display:flex;flex-wrap:wrap;gap:6px 12px;color:var(--muted);font-size:11px}
+    .weee-detail-card{border:1px solid #cfe2e8;border-radius:9px;background:#fff;padding:12px;margin-bottom:10px}
+    .weee-detail-card.selected{border-color:#62a999;box-shadow:0 0 0 2px #e3f2ee}
+    .weee-detail-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}
+    .weee-detail-head b{font-size:13px}
+    .weee-item-form{display:grid;grid-template-columns:1fr 1.2fr 150px;gap:8px;align-items:end}
+    .weee-item-form label{display:block;color:var(--muted);font-size:11px;margin-bottom:4px}
+    .weee-item-form input,.weee-item-form select{width:100%;border:1px solid var(--line);border-radius:6px;padding:7px 8px;font:inherit;background:#fff;color:var(--ink)}
+    .weee-item-evidence{margin-top:8px;padding-top:8px;border-top:1px dashed #dce8eb;color:var(--muted);font-size:11px;line-height:1.55}
+    .weee-class-note{font-size:11px;color:var(--muted);margin-top:8px}
+    .weee-evidence-card{border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:9px;background:#fff}
+    .weee-evidence-card h4{margin:0 0 6px;font-size:12px}
+    .weee-evidence-card .raw{max-height:180px;font-size:12px;padding:10px}
+    .weee-rule{background:#f7fafb;border-left:3px solid #62a999;padding:8px 10px;font-size:11px;line-height:1.55;color:#4d6b73}
+    @media(max-width:780px){.weee-item-form{grid-template-columns:1fr}}
+  </style>
 </head>
 <body>
 <div class="shell">
@@ -124,6 +142,7 @@
     <div class="brand">ECOPV ORDER OPERATIONS<small>MAIL AUDIT WORKBENCH</small></div>
     <nav class="nav">
       <button class="active" data-view="inbox"><i>▦</i>询单复核</button>
+      <button data-view="weee"><i>◈</i>德国 WEEE <span id="weee-nav-count" class="nav-count"></span></button>
       <button data-view="missing"><i>⚠</i>漏单邮件 <span id="missing-nav-count" class="nav-count"></span></button>
       <button data-view="filtered"><i>▥</i>已过滤邮件 <span id="filtered-nav-count" class="nav-count"></span></button>
     </nav>
@@ -755,6 +774,136 @@
   }
   const _renderDetailWithAttachmentLinks=renderDetail;
   renderDetail=function(){_renderDetailWithAttachmentLinks();enhanceRawAttachmentLinks()};
+  // 德国 WEEE 独立工作页：邮件仍只保留一份，页面只从同一份邮件对象
+  // 筛选出 WEEE 明细，不复制邮件或改变普通询单队列的状态。
+  const WEEE_CLASS_NAMES={1:'热交换设备',2:'屏幕和显示设备',3:'灯具和光源',4:'大型设备',5:'小型设备',6:'小型信息和电信设备'};
+  function weeeDetailsOf(mail){return (mail?.details||[]).filter(detail=>detail?.weee?.enabled)}
+  function firstWeeeDetail(mail){return weeeDetailsOf(mail)[0]||null}
+  function weeeMailsForView(){
+    const result=(app.data?.mails||[]).filter(mail=>dateMatches(mail)&&weeeDetailsOf(mail).length>0);
+    const statusFiltered=app.filter==='all'?result:result.filter(mail=>mail.status===app.filter);
+    return statusFiltered.filter(matchMail);
+  }
+  const _matchMailBeforeWeee=matchMail;
+  matchMail=function(mail){
+    // 有搜索词时必须真正命中标题；旧实现 searchScore=0 也算命中，
+    // 导致输入唯一标题词仍返回全部邮件。
+    return app.search&&String(app.search).trim()?_matchMailBeforeWeee(mail)&&searchScore(mail)>0:_matchMailBeforeWeee(mail);
+  };
+  const _queueMailsBeforeWeee=queueMails;
+  queueMails=function(){return app.view==='weee'?weeeMailsForView():_queueMailsBeforeWeee()};
+  function weeeStatusLabel(detail){
+    const status=detail?.weee?.status||'';
+    if(detail?.weee?.confirmed||status==='confirmed')return '已确认，待工单品类核对';
+    if(status==='已匹配'||status==='matched')return '工单品类已匹配';
+    if(status==='未找到'||status==='missing')return '工单品类未找到';
+    return '待人工确认';
+  }
+  function weeeItemStatus(item){
+    if(item?.category_class_status==='matched'&&item?.category_class)return '已归类';
+    if(item?.category_class_status==='ambiguous')return '多个候选，待人工确认';
+    return '未能唯一归类';
+  }
+  function renderWeeeQueue(){
+    const mails=queueMails();
+    $('#queue-title').textContent='德国 WEEE 邮件';
+    $('#queue-count').textContent=mails.length+' 封';
+    $('#filters').style.display='flex';
+    $('#queue-list').innerHTML=mails.length?mails.map(mail=>{
+      const details=weeeDetailsOf(mail),items=details.reduce((sum,detail)=>sum+(detail.weee.items||[]).length,0);
+      return `<div class="mail-item ${app.mailId===mail.id?'active':''}" data-mail="${esc(mail.id)}"><div class="mail-line"><input class="mail-select" type="checkbox" data-select-mail="${esc(mail.id)}" ${app.selectedMailIds.has(mail.id)?'checked':''} aria-label="选择邮件"/><div class="mail-subject">${esc(mail.subject||'无主题')} <span class="mail-number">邮件编号 ${esc(mail.mail_number||mail.id)}</span></div></div><div class="mail-meta"><span>${esc(mail.sender||'未知发件人')}</span><span>${esc(mail.date||'')}</span></div><div class="queue-extra"><span>${details.length} 条 WEEE 明细 · ${items} 个品牌/品类项目</span><span class="pill ${statusClass(mail.status)}">${statusLabel(mail.status)}</span></div></div>`;
+    }).join(''):'<div class="empty">没有符合日期、搜索和状态条件的德国 WEEE 邮件</div>';
+    document.querySelectorAll('#queue-list [data-mail]').forEach(node=>node.onclick=()=>{
+      app.mailId=node.dataset.mail;
+      const mail=(app.data?.mails||[]).find(item=>item.id===app.mailId);
+      app.detailId=firstWeeeDetail(mail)?.id||null;app.weeeItemIndex=0;app.tab='details';render();
+    });
+    bindQueueSelection();
+  }
+  const _renderQueueBeforeWeee=renderQueue;
+  renderQueue=function(){if(app.view==='weee'){renderWeeeQueue();return}_renderQueueBeforeWeee()};
+  const _renderStatsBeforeWeee=renderStats;
+  renderStats=function(){
+    if(app.view!=='weee'){_renderStatsBeforeWeee();return}
+    const mails=(app.data?.mails||[]).filter(mail=>dateMatches(mail)&&weeeDetailsOf(mail).length);
+    const details=mails.flatMap(mail=>weeeDetailsOf(mail));
+    const items=details.flatMap(detail=>detail.weee.items||[]);
+    const pending=items.filter(item=>item.category_class_status!=='matched'||!details.find(detail=>detail.weee.items?.includes(item))?.weee?.confirmed).length;
+    const checked=items.length-pending;
+    const values=[['mails','德国WEEE邮件',''],['details','WEEE业务明细',''],['items','品牌/品类项目',''],['pending','待人工确认','amber'],['checked','已归类项目','green']];
+    const counts={mails:mails.length,details:details.length,items:items.length,pending,checked};
+    $('#stats').innerHTML=values.map(item=>`<div class="stat ${item[2]}"><div class="num">${counts[item[0]]}</div><div class="label">${item[1]}</div></div>`).join('');
+    const nav=$('#weee-nav-count');if(nav)nav.textContent=mails.length||'';
+    const filteredCount=$('#filtered-nav-count');if(filteredCount)filteredCount.textContent=(app.data?.filtered_mails||[]).filter(dateMatches).length||'';
+    const missingCount=$('#missing-nav-count');if(missingCount)missingCount.textContent=(app.data?.missing_mails||[]).filter(dateMatches).length||'';
+    setHistoryState();
+  };
+  function weeeClassOptions(selected){
+    return '<option value="">待人工选择</option>'+Object.entries(WEEE_CLASS_NAMES).map(([id,name])=>`<option value="${id}" ${String(selected||'')===id?'selected':''}>第${id}类 · ${name}</option>`).join('');
+  }
+  function collectWeeeItems(detail){
+    const root=document.querySelector(`[data-weee-detail="${CSS.escape(detail.id)}"]`);
+    if(!root)return (detail.weee.items||[]).map(item=>({...item}));
+    return [...root.querySelectorAll('[data-weee-item]')].map((node,index)=>{
+      const original=(detail.weee.items||[])[index]||{};
+      const classId=node.querySelector('[data-weee-class]')?.value||'';
+      return {...original,
+        brand:node.querySelector('[data-weee-brand]')?.value.trim()||'',
+        category:node.querySelector('[data-weee-category]')?.value.trim()||'',
+        category_original:node.querySelector('[data-weee-category]')?.value.trim()||'',
+        category_class:classId,
+        category_class_name:WEEE_CLASS_NAMES[classId]||'',
+        category_class_status:classId?'matched':(original.category_class_status||'unmatched')};
+    });
+  }
+  async function confirmWeeeDetail(mail,detail){
+    const items=collectWeeeItems(detail);
+    if(!items.length){toast('当前 WEEE 明细没有可确认的品牌/品类项目');return}
+    const reason=prompt('请输入德国 WEEE 品牌与品类确认说明：','人工核对邮件、附件及产品分类表后确认');
+    if(reason===null)return;
+    try{
+      const result=await api('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'confirm_weee',record_id:detail.id,mail_id:mail.id,mail_number:mail.mail_number,detail_number:detail.detail_number,subject:mail.subject,weee_items:items,reason:reason.trim()||'人工核对邮件、附件及产品分类表后确认'})});
+      toast(result.message||'德国 WEEE 品牌与品类已保存');await load();
+    }catch(error){toast(error.message)}
+  }
+  function renderWeeeDetail(){
+    const mail=currentMail(),details=weeeDetailsOf(mail);
+    if(!mail||!details.length){$('#detail').innerHTML='<div class="empty">请选择德国 WEEE 邮件</div>';return}
+    const selected=details.find(detail=>detail.id===app.detailId)||details[0];
+    if(app.detailId!==selected.id)app.detailId=selected.id;
+    const cards=details.map(detail=>{
+      const w=detail.weee||{},items=Array.isArray(w.items)?w.items:[];
+      return `<div class="weee-detail-card ${selected.id===detail.id?'selected':''}" data-weee-detail="${esc(detail.id)}"><div class="weee-detail-head"><b>业务明细 ${esc(detail.detail_number||detail.id)}</b><span class="pill ${w.confirmed?'confirmed':'review'}">${esc(weeeStatusLabel(detail))}</span></div><div class="weee-mail-meta"><span>代理：${esc(detail.fields?.agent||'待确认')}</span><span>公司：${esc(detail.fields?.company||'待确认')}</span><span>项目：${esc(detail.fields?.program||'德国WEEE')}</span></div>${items.length?items.map((item,index)=>`<div class="weee-item-form" data-weee-item="${index}" style="margin-top:10px"><div><label>品牌</label><input data-weee-brand value="${esc(item.brand||'')}" placeholder="邮件或附件中的品牌"/></div><div><label>邮件/附件原始品类</label><input data-weee-category value="${esc(item.category||item.category_original||'')}" placeholder="例如：热交换设备"/></div><div><label>德国 ElektroG 分类</label><select data-weee-class>${weeeClassOptions(item.category_class)}</select></div><div class="weee-item-evidence" style="grid-column:1/-1"><span class="pill ${item.category_class_status==='matched'?'confirmed':'review'}">${esc(weeeItemStatus(item))}</span> <span>证据：${esc((item.sources||[]).join('；')||item.source||'邮件/附件')}</span>${item.category_candidates?.length?`<br>候选：${item.category_candidates.map(candidate=>`第${esc(candidate.category_class)}类·${esc(candidate.category_class_name)}`).join('、')}`:''}</div></div>`).join(''):'<div class="empty" style="padding:18px 5px">未提取到明确品牌/品类，请查看右侧原文和附件后人工补录。</div>'}<div class="weee-class-note">原始品类保留邮件/附件用词；“第几类”是按产品分类表的派生结果。未能唯一判断的项目请人工选择后再确认。</div><div style="display:flex;justify-content:flex-end;margin-top:10px"><button class="btn small primary" data-confirm-weee="${esc(detail.id)}">${w.confirmed?'重新保存 WEEE 确认':'确认品牌/品类并核对工单'}</button></div></div>`;
+    }).join('');
+    $('#detail').innerHTML=`<div class="detail-head"><span class="pill ready">德国 WEEE 专项</span><div class="detail-title">${esc(mail.subject||'无主题')}</div><div class="detail-meta"><span>邮件编号：${esc(mail.mail_number||mail.id)}</span><span>发件人：${esc(mail.sender||'未知')}</span><span>时间：${esc(mail.date||'')}</span><span>明细数：${details.length}</span></div><div class="evidence-sub" style="margin-top:8px">先核对品牌与邮件/附件原始品类，再按分类表确认第 1–6 类；保存后阶段二只读核对注册工单的“品类明细”。</div></div><div class="steps"><div class="step done">邮件归档</div><div class="step done">附件盘点</div><div class="step active">品牌/品类提取</div><div class="step active">人工确认</div><div class="step">注册工单品类核对</div></div><div class="tabs"><button class="active">WEEE 品类项目</button><button disabled>邮件原文见右侧证据</button></div><div class="detail-body"><div class="weee-page-note">每个卡片是一条德国 WEEE 业务明细；每个品牌/品类行可单独核对。确认只保存工作台状态和操作记录，不会直接修改或提交工单。</div>${cards}</div>`;
+    document.querySelectorAll('[data-weee-detail]').forEach(node=>node.onclick=event=>{if(event.target.closest('input,select,button'))return;app.detailId=node.dataset.weeeDetail;render()});
+    document.querySelectorAll('[data-confirm-weee]').forEach(node=>node.onclick=event=>{event.stopPropagation();const detail=details.find(item=>item.id===node.dataset.confirmWeee);if(detail)confirmWeeeDetail(mail,detail)});
+  }
+  function renderWeeeEvidence(){
+    const mail=currentMail(),detail=currentDetail(),box=$('#evidence');
+    if(!box)return;
+    if(!mail||!detail?.weee?.enabled){box.innerHTML='<div class="empty">选择 WEEE 业务明细后显示邮件与附件证据</div>';return}
+    const attachments=(mail.attachments||'').split(/[；;]+/).map(item=>item.trim()).filter(Boolean).map(name=>attachmentChip(mail,name)).join('')||'<span class="muted">无附件</span>';
+    const items=(detail.weee.items||[]).map((item,index)=>`<div class="weee-evidence-card"><h4>${index+1}. ${esc(item.brand||'未提取品牌')} · ${esc(item.category||item.category_original||'未提取品类')}</h4><div class="weee-rule">分类结果：${item.category_class?`第${esc(item.category_class)}类 · ${esc(item.category_class_name||'')}`:'尚未唯一归类'}<br>规则来源：${esc(item.category_rule_source||'产品分类表 中文版.docx')}</div><div class="ev-line" style="margin-top:7px"><span>证据来源：</span>${esc((item.sources||[]).join('；')||item.source||'邮件/附件')}</div><div class="raw" style="margin-top:7px">${esc(item.evidence||'没有保存到原始证据文本')}</div></div>`).join('');
+    box.innerHTML=`<h3>德国 WEEE 证据</h3><div class="evidence-sub">当前只显示所选明细真实出现过的标题、正文、附件名和附件表格证据；没有出现的来源不会强行标红。</div><div class="ev-card"><div class="ev-label">邮件标题</div><div class="ev-line">${esc(mail.subject||'无主题')}</div><span class="source">来源：邮件主题</span></div><div class="ev-card"><div class="ev-label">邮件正文</div><div class="raw">${esc(mail.body||'（正文为空）')}</div><span class="source">来源：邮件正文</span></div><div class="ev-card"><div class="ev-label">附件清单</div><div>${attachments}</div><span class="source">来源：邮件附件名称</span></div><div class="section-title" style="margin-top:14px">当前明细的品牌/品类证据</div>${items||'<div class="empty">未提取到可回溯的品牌/品类证据</div>'}<div class="weee-rule" style="margin-top:10px"><b>核对路径：</b>工作台 → 工单管理 → 注册工单 → 品类明细。操作人员确认后，阶段二读取该页签中的品牌/品类字段，与本页项目逐项比较。</div>`;
+  }
+  const _renderDetailBeforeWeee=renderDetail;
+  renderDetail=function(){if(app.view==='weee'){renderWeeeDetail();return}_renderDetailBeforeWeee()};
+  const _renderEvidenceBeforeWeee=renderEvidence;
+  renderEvidence=function(){if(app.view==='weee'){renderWeeeEvidence();return}_renderEvidenceBeforeWeee()};
+  const _renderBeforeWeee=render;
+  render=function(){
+    if(app.view==='weee'){
+      const source=queueMails(),current=source.find(mail=>mail.id===app.mailId);
+      if(!current){app.mailId=source[0]?.id||null;app.detailId=firstWeeeDetail(source[0])?.id||null;app.weeeItemIndex=0}
+      else if(!weeeDetailsOf(current).some(detail=>detail.id===app.detailId)){app.detailId=firstWeeeDetail(current)?.id||null}
+    }
+    _renderBeforeWeee();
+    if(app.view==='weee'){
+      $('#source-path').textContent='来源：阶段一邮件、正文及附件结构化证据';
+      $('#view-banner').innerHTML='<b>德国 WEEE 专项：</b>品牌与原始品类单独提取，按产品分类表映射六类；人工确认后再核对注册工单的品类明细。';
+    }
+  };
   window.addEventListener('online',()=>load());
   startHealthMonitor();
   load();
