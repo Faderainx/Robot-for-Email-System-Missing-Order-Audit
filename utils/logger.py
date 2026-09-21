@@ -11,7 +11,14 @@ def setup_logger(log_dir: str = "logs", level: str = "INFO") -> logging.Logger:
 
     logger = logging.getLogger("mail_audit")
     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
-    logger.handlers.clear()
+    # 连续运行时关闭旧文件句柄并移除旧 GUI/控制台 handler，避免日志重复和
+    # Windows 上残留句柄导致日志文件无法移动或删除。
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:
+            pass
 
     fh = logging.FileHandler(log_file, encoding="utf-8")
     fh.setLevel(logging.DEBUG)

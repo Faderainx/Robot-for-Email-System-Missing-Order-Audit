@@ -27,6 +27,10 @@ mail_audit_bot/
 ├── modules/                    # 核心业务模块
 │   ├── mail_reader.py          # M1 邮件读取 (IMAP 阿里邮箱)
 │   ├── mail_filter.py          # M2 邮件过滤 (规则引擎 + LLM 二次识别)
+│   ├── llm_intent.py           # LLM 调用、一次修复与调用审计
+│   ├── agent_schemas.py        # Pydantic 严格输出协议
+│   ├── agent_workflow.py       # 本地 Agent Workflow 编排
+│   ├── business_validator.py   # 明显异常字段的确定性业务校验
 │   ├── field_extractor.py      # M3 字段提取 (表驱动 + 模糊匹配)
 │   ├── project_normalizer.py   # M4 项目标准化与拆分
 │   ├── workorder_checker.py    # M5 工单比对 (Playwright 半自动)
@@ -43,21 +47,23 @@ mail_audit_bot/
 │   └── project_names.xlsx      # 附件四: 标准项目名称表
 │
 ├── output/                     # 输出结果目录
-│   ├── to_workorder_list.xlsx            # 阶段一稳定名 (待查工单)
-│   ├── to_review_list.xlsx               # 阶段一稳定名 (漏单复查/待确认)
-│   ├── filtered_mail_record.xlsx         # 阶段一稳定名 (过滤审计)
-│   ├── workorder_check_result.xlsx       # 阶段二稳定名 (工单核对结果)
-│   ├── *_YYYYMMDD_HHMMSS.xlsx            # 时序副本 (阶段一/二每次运行自动复制)
-│   ├── 漏单清单_YYYYMMDD_HHMMSS.xlsx     # 一站式兼容旧行为
-│   ├── 过滤清单_YYYYMMDD_HHMMSS.xlsx
-│   └── workorder_*.png         # 工单系统截图 (调试用)
+│   ├── stage1_email/                     # 阶段一：邮件解析结果
+│   │   ├── to_workorder_list.xlsx        # 可进入阶段二工单查询
+│   │   ├── to_review_list.xlsx           # 需人工复核/补全
+│   │   ├── filtered_mail_record.xlsx     # 过滤邮件审计
+│   │   └── *_YYYYMMDD_HHMMSS.xlsx        # 阶段一历史副本
+│   ├── stage2_workorder/                 # 阶段二：工单系统比对结果
+│   │   └── workorder_check_result*.xlsx
+│   ├── manual_review/                    # 工作台人工确认后的结果
+│   └── diagnostics/                      # 预留：探测文件、调试截图等
 │
 ├── cache/                      # 本地缓存目录 (可清理, 不影响业务)
 │   ├── mails/{mailbox}_{uid}.eml          # 邮件原始字节 (按邮箱+UID 命名)
 │   └── attachments/{hash}_{filename}      # 图片附件按内容 hash 去重
 │
 ├── storage/                    # 持久化数据目录
-│   └── query_cache.json        # 工单查询缓存 (代理|公司|项目 三联键, TTL 默认 7 天)
+│   ├── query_cache.json        # 工单查询缓存 (代理|公司|项目 三联键, TTL 默认 7 天)
+│   └── workbench.db            # 独立工作台 SQLite 数据库（输入增量 + 操作留痕）
 │
 ├── logs/                       # 运行日志目录
 └── session_state.json          # GUI 状态持久化 (时间范围/汇总表路径/运行模式/阶段二输入路径)
@@ -65,6 +71,12 @@ mail_audit_bot/
 ```
 
 ## 缓存与持久化
+
+### 独立工作台数据库
+
+工作台可以通过 `启动独立工作台.bat` 或 `python workbench_launcher.py` 单独启动，不需要打开 PyQt 主程序。阶段一/阶段二每次产生的新数据会增量写入 `storage/workbench.db`；工作台启动或点击“刷新数据”时优先读取数据库，Excel 仍作为兼容输入并会自动导入。数据库按邮件身份幂等更新，历史数据不会因下一次运行被覆盖。
+
+外部程序也可以向本机服务发送 `POST /api/ingest`，请求体使用 `{"dataset":"active","rows":[...]}`；可用 `GET /api/operations?date=YYYY-MM-DD` 按操作日期读取人工/系统留痕，`GET /api/database` 查看数据库统计。
 
 | 类型 | 路径 | 作用 | 清理影响 |
 |------|------|------|----------|
@@ -111,17 +123,34 @@ mail_audit_bot/
 | 业务词 (KEYWORDS_BUSINESS) | WEEE、电池法、包装法、EPR、一次性塑料、BAT、德国、法国、意大利、西班牙、荷兰、波兰、瑞典、比利时、爱尔兰、葡萄牙、奥地利 |
 | 无关词 (KEYWORDS_IRRELEVANT) | 账单、invoice、合同、协议、咨询、反馈、建议、下证、证书号、保证金、担保、退款、回收费、购买 |
 
-**第二层 — LLM 二次意图识别 (可选)**
+**第二层 — 意图 Agent (可选)**
 
-- 对第一层**过滤掉的**邮件逐封送 DeepSeek 做意图分类
+- 对第一层标记为“不确定”的邮件，以及允许复检的过滤邮件，逐封做意图分类
+- 规则明确命中的注册邮件不重复调用；硬过滤项不调用，控制时间和 Token 成本
 - LLM 判定"注册类" → 恢复到有效列表 (标记"LLM恢复")
 - LLM 判定其他 → 确认过滤
+- API、JSON 或字段协议失败 → 保留原邮件并强制进入人工复核，不能视为“非目标”
 - `api_key` 为空时自动跳过，仅用规则引擎
 
 **第三层 — 人工复核**
 
 - 输出两份 Excel: 漏单清单 + 过滤清单
 - 颜色标记: 红色=漏单、黄色=日期异常、蓝色=待确认、橙色=多匹配、灰色=不确定
+
+### 本地 Agent Workflow 与输出闸门
+
+自动链路固定为：规则预筛 → 意图 Agent → Pydantic 校验 → 规则/字段 Agent 提取 →
+Pydantic 校验 → 确定性业务校验 → 语义复检 Agent → Pydantic 校验 → Excel/人工复核。
+
+- 不依赖 Dify 或 Coze，继续由现有 Python GUI 启动。
+- 每个模型输出只允许一次格式/结构修复；再次失败就转人工。
+- Pydantic 使用严格类型并禁止额外字段，避免字符串 `"false"` 被当成真值、项目字符串被当成数组等问题。
+- 批量复检要求返回 ID 与请求一一对应，缺失、重复、越界都会失败并转人工。
+- “一家公司”、说明句、邮箱、附件名等明显不是真实公司的内容由确定性规则拦截；系统只标记，不自动编造或改写公司名。
+- EPR 申请表中的“POA法人职务/Legal positions”“注册资本/Registration Capital”“签字地点/时间”、
+  联系人、证件号、地址、邮箱及表头说明不是客户明细；结构化解析会拒绝这些字段，字段 Agent
+  无法确认公司主体时保持空值并转人工。旧数据库中的同类脏记录仅保留历史，不再显示在业务队列。
+- 缺代理、客户、项目、需求，低置信，或任一校验未通过的行只能进入 `to_review_list.xlsx`，不能进入阶段二。
 
 ### M3 字段提取模块 (field_extractor.py)
 
@@ -206,7 +235,9 @@ mail_audit_bot/
 | 漏单清单 | 有效邮件的字段提取+工单比对结果 | 红色=漏单、黄色=日期异常、蓝色=待确认、橙色=多匹配、灰色=不确定 |
 | 过滤清单 | 被过滤的邮件及原因 | — |
 
-**漏单清单字段**: 发件人邮箱、发件日期、主题、正文(精简)、代理、客户、项目、需求、是否已录单、工单日期、匹配状态、查询时间戳
+**漏单清单字段**: 发件人邮箱、发件日期、主题、正文(精简)、代理、客户、项目、需求、是否已录单、工单日期、下单日期、匹配状态、查询时间戳
+
+> 日期口径: `工单日期` = 邮件发来的日期（发件日期）；`下单日期` = 工单系统返回的下单日期（页面原始文本）。
 
 ## 工具模块
 
@@ -289,7 +320,7 @@ mail_audit_bot/
 
 | Key | 默认 | 说明 |
 |-----|------|------|
-| `date_tolerance_days` | `60` | 邮件日期 vs 工单日期容差 |
+| `date_tolerance_days` | `60` | 邮件日期 vs **平台下单日期**容差（`工单日期` 本身就是邮件日期，不参与比对） |
 | `customer_threshold` | `85` | 客户名相似度阈值（rapidfuzz） |
 
 ### ocr — OCR 兜底开关
@@ -359,7 +390,7 @@ playwright>=1.40
 9. **阶段一/二入口解耦 (2026-09-10)**: GUI 加运行模式选择（一站式 / 仅阶段一 / 仅阶段二）。WorkerThread.run() 拆为 `_run_stage1()`（邮件解析输出三份产出）/ `_run_stage2()`（读 stage1 输出 xlsx→前置校验→RPA→输出 workorder_check_result.xlsx）/ `_run_all()`（兼容原行为）。阶段二模式隐藏时间范围/邮箱导入等控件，新增"选择阶段一输出文件"按钮；session_state 持久化 mode + stage2_input_path
 10. **阶段二断点续查 + 请求间隔 (2026-09-10)**: `WorkOrderChecker.search_one` 加 `query_cache.json` 缓存（按 代理-公司-项目 三联键），`storage/query_cache.json` 落盘，TTL 默认 7 天（`query_cache_ttl_days`），启动时命中直接复用不再走 RPA。`search_batch` 加条目间间隔 `query_interval_seconds`（默认 3s，防工单系统限流）+ `max_total_seconds` 总超时强制终止（剩余条数下次续跑）
 11. **阶段二前置校验 (2026-09-10)**: `WorkOrderChecker.preprocess_rows()` 静态方法：①跳过「代理空 且 置信度=需人工确认」的条目（输出告警，不查 RPA）；②按 (公司,项目) 三联键去重（重复条目合并查询，节省 RPA 时间）。跳过的条目录入 workorder_check_result.xlsx 的"跳过后说明"列
-12. **输出文件命名规范化 (2026-09-10)**: 阶段一三份产物使用稳定名 `to_workorder_list.xlsx` / `to_review_list.xlsx` / `filtered_mail_record.xlsx` + 时序副本 `to_workorder_list_YYYYMMDD_HHMMSS.xlsx`（同目录自动复制），便于跨天续跑不丢历史+阶段二可稳定读到最新文件。阶段二产物同理 `workorder_check_result.xlsx` + 时序副本
+12. **输出文件命名与分类 (2026-09-10)**: 默认将阶段一结果写入 `output/stage1_email/`，阶段二结果写入 `output/stage2_workorder/`，工作台导出写入 `output/manual_review/`；`output/diagnostics/` 作为探测文件和调试截图的统一预留目录。每类仍保留稳定名和时序副本，阶段二候选列表会递归扫描这些目录；旧版直接放在 `output/` 根目录的文件仍兼容读取。
 
 ## 测试
 
@@ -399,6 +430,6 @@ SOP 定义了:
 - 字段提取优先级: 名称 → 邮件正文 → 附件
 - 项目拆分规则和示例
 - 工单核对匹配条件: 日期+代理+客户+项目
-- 日期规则: 邮件日期与工单日期相差不超过 2 个月
+- 日期规则: 邮件日期与平台下单日期相差不超过 2 个月（`工单日期` = 邮件发来日期，`下单日期` = 工单系统返回）
 - 输出格式: 附件一模板
 ```
