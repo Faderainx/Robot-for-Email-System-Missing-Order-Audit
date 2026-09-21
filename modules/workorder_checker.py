@@ -479,6 +479,12 @@ class WorkOrderChecker:
         self.login_wait_seconds = max(
             10, int(float(config.get("login_wait_seconds", 120)))
         )
+        # 长时间停留后再次点击查询时，先主动探测一次登录页并刷新保存态，
+        # 避免把远端会话过期误报成“查询无数据/页面失效”。远端 Cookie 的实际
+        # 有效期仍由工单系统决定；过期后会重新进入可视登录流程，而不是静默失败。
+        self.login_refresh_interval_seconds = max(
+            60, int(float(config.get("login_refresh_interval_seconds", 900)))
+        )
         # 无头下没人看浏览器，凡是"给人看的"动作一律省掉：
         # 字段间停留归零、缓存命中的输入条件重放直接跳过（每条能省好几秒）。
         if self.headless:
@@ -527,6 +533,7 @@ class WorkOrderChecker:
         )
         self.force_live_query = bool(config.get("force_live_query", False))
         self._session_start_ts = None
+        self._last_login_check = 0.0
         self.logger = logger
         self._playwright = None
         self._browser = None
@@ -754,6 +761,31 @@ class WorkOrderChecker:
         except Exception:
             pass
 
+    async def _ensure_login_session(self) -> bool:
+        """在长时间空闲后查询前重新确认登录态，过期时走正常人工登录流程。"""
+        if not self._logged_in:
+            return await self.login()
+        if self._page is None:
+            self._logged_in = False
+            return await self.login()
+        now = time.monotonic()
+        if now - self._last_login_check < self.login_refresh_interval_seconds:
+            return True
+        try:
+            # 只加载工单入口，不修改任何工单；之后 search_batch 会再次进入注册工单页。
+            await self._page.goto(self.url, wait_until="domcontentloaded", timeout=self.timeout * 1000)
+            if await self._is_login_form_page():
+                self._logged_in = False
+                return await self.login()
+            self._last_login_check = now
+            await self._save_login_state()
+            self._log("长时间空闲后的登录态探测通过，已刷新本地登录态")
+            return True
+        except Exception as exc:
+            self._log(f"登录态探测异常，将重新建立会话：{exc}", "warning")
+            self._logged_in = False
+            return await self.login()
+
     async def login(self) -> bool:
         if self._logged_in:
             return True
@@ -767,6 +799,7 @@ class WorkOrderChecker:
             # 登录页有图形验证码，无头下不可能人工输入，全靠这一条路径。
             if not await self._is_login_form_page():
                 self._logged_in = True
+                self._last_login_check = time.monotonic()
                 self._log("已复用保存的登录态，无需重新输验证码")
                 await self._save_login_state()  # 顺带刷新 cookie 有效期
                 await self._after_login_ready()
@@ -788,6 +821,7 @@ class WorkOrderChecker:
                 await self._page.wait_for_load_state("networkidle")
                 if not await self._is_login_form_page():
                     self._logged_in = True
+                    self._last_login_check = time.monotonic()
                     self._log("切换后登录态已生效，免验证码登录成功")
                     await self._save_login_state()
                     await self._after_login_ready()
@@ -849,12 +883,14 @@ class WorkOrderChecker:
                 await self._page.wait_for_load_state("networkidle")
                 await asyncio.sleep(2)
                 self._logged_in = True
+                self._last_login_check = time.monotonic()
                 await self._after_login_ready()
             except Exception:
                 current = self._page.url
                 if "/login" not in current and "workbench" in current:
                     self._log("已在工单系统页面，登录成功")
                     self._logged_in = True
+                    self._last_login_check = time.monotonic()
                 else:
                     self._log(f"登录超时，当前URL: {current}", "error")
                     return False
@@ -2356,12 +2392,11 @@ class WorkOrderChecker:
         if self._is_cancel_requested():
             return []
 
-        if not self._logged_in:
-            success = await self._await_or_cancel(self.login(), False)
-            if self.cancelled:
-                return []
-            if not success:
-                return []
+        success = await self._await_or_cancel(self._ensure_login_session(), False)
+        if self.cancelled:
+            return []
+        if not success:
+            return []
 
         self._session_start_ts = time.monotonic()
         # 只有确认到注册工单查询页才允许写入查询条件，防止误操作其他页面。
