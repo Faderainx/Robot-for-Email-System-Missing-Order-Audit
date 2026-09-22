@@ -20,12 +20,13 @@ WEEE_RE = re.compile(r"(?<![A-Za-z])WEEE(?![A-Za-z])", re.I)
 WEEE_RULE_SOURCE = "产品分类表 中文版.docx（德国 ElektroG/WEEE 六类）"
 
 _BRAND_KEYS = (
-    "品牌", "品牌名称", "品牌名", "brand", "brand name", "marke",
+    "品牌", "品牌名称", "品牌名", "新增品牌", "新品牌", "brand", "brand name", "marke",
 )
 _CATEGORY_KEYS = (
     "品类", "品類", "类别", "類別", "产品类别", "產品類別", "商品类别",
     "商品類別", "产品分类", "產品分類", "设备类别", "設備類別", "注册类别",
-    "注册品类", "申报品类", "申報品類", "category", "product category",
+    "注册品类", "申报品类", "申報品類", "新增类别", "新增品类", "新类别", "新品类",
+    "category", "product category",
     "product type", "product name", "product type/name", "warengruppe", "produktkategorie",
 )
 _WORKORDER_CATEGORY_KEYS = _CATEGORY_KEYS + (
@@ -82,7 +83,7 @@ WEEE_CATEGORY_DEFINITIONS = {
         "name": "大型设备",
         "aliases": (
             "大型设备", "大件设备", "大型家电", "大型电气设备", "大型光伏电池板",
-            "光伏电池板", "太阳能电池板", "工业设备", "商业厨房设备", "电动医院病床",
+            "大型非光伏设备", "大型非光伏", "光伏电池板", "太阳能电池板", "工业设备", "商业厨房设备", "电动医院病床",
             "大型医疗设备", "自动售货机", "取款机", "充电站", "电动汽车充电柱",
             "电机", "发电机", "打印机", "复印机", "大型打印机", "大型it设备", "large equipment",
             "large appliance", "industrial equipment", "pv panel", "solar panel",
@@ -95,7 +96,7 @@ WEEE_CATEGORY_DEFINITIONS = {
         "name": "小型设备",
         "aliases": (
             "小型设备", "小家电", "小型家电", "小型电气设备", "小型光伏电池板",
-            "小型工具", "吸尘器", "咖啡机", "微波炉", "风扇", "加湿器", "电动工具",
+            "小型非光伏设备", "小型非光伏", "小型工具", "吸尘器", "咖啡机", "微波炉", "风扇", "加湿器", "电动工具",
             "玩具", "耳机", "扬声器", "摄像机", "照相机", "无人机", "智能手表",
             "体温计", "电动牙刷", "充电器", "插座", "延长线", "电缆", "电源适配器",
             "small equipment", "small appliance", "vacuum cleaner", "microwave",
@@ -334,8 +335,91 @@ def _label_value_pairs(text: str, labels: Sequence[str]) -> List[tuple[str, str]
     return [(_text(match.group("label")), _text(match.group("value"))) for match in pattern.finditer(text)]
 
 
+_INLINE_BRAND_MARKERS = ("新增品牌", "新品牌", "品牌名称", "品牌名", "品牌")
+_INLINE_CATEGORY_MARKERS = (
+    "新增类别", "新增品类", "新类别", "新品类", "产品类别", "产品分类", "注册类别",
+    "注册品类", "申报品类", "品类", "类别",
+)
+
+
+def _inline_marker_pairs(text: str, labels: Sequence[str]) -> List[tuple[str, str]]:
+    """读取不带冒号的邮件写法，例如“新增品牌AUZONIMICS 第六类”。"""
+    if not text:
+        return []
+    label_pattern = "|".join(re.escape(label) for label in sorted(labels, key=len, reverse=True))
+    all_markers = "|".join(re.escape(label) for label in sorted(
+        set(_INLINE_BRAND_MARKERS) | set(_INLINE_CATEGORY_MARKERS), key=len, reverse=True,
+    ))
+    pattern = re.compile(
+        rf"(?<![\u4e00-\u9fffA-Za-z0-9])(?P<label>{label_pattern})[ \t]*(?:[:：=＝][ \t]*)?(?P<value>[^\n\r;；|]+)", re.I,
+    )
+    pairs: List[tuple[str, str]] = []
+    for match in pattern.finditer(text):
+        # 主题里常把“新增类别”作为普通标题词而不是字段，例如“新增类别 美鸥跨境…”。
+        # 无冒号的类别字段交给“第几类”或同一行自然语言分类逻辑处理，避免把整段主题当品类。
+        has_separator = bool(re.match(r"[ \t]*[:：=＝]", text[match.end("label"):]))
+        if set(labels).issubset(set(_INLINE_CATEGORY_MARKERS)) and not has_separator:
+            continue
+        value = match.group("value")
+        # 一个片段里可能连续写成“新增类别：小型非光伏（品牌：PURELLEL）”或
+        # “新增品牌AUZONIMICS 第六类”，先在下一个字段/类别编号处截断。
+        value = re.split(
+            rf"(?=\s*(?:{all_markers})\s*(?:[:：=＝]|(?=[\u4e00-\u9fffA-Za-z]))|"
+            rf"\s*第\s*[1-6一二三四五六]\s*类)",
+            value, maxsplit=1, flags=re.I,
+        )[0]
+        # 无冒号写法“品牌 X 冷却设备”中，品牌值和自然语言品类相邻；
+        # 品类命中分类表后把它从品牌值中拆出，避免把两个字段粘成一个。
+        if not has_separator and set(labels).issubset(set(_INLINE_BRAND_MARKERS)):
+            context_classification = classify_weee_product(value)
+            if context_classification.get("status") == "matched":
+                for evidence in context_classification.get("evidence", []):
+                    index = value.casefold().find(_text(evidence).casefold())
+                    if index > 0:
+                        value = value[:index]
+                        break
+        value = _clean_candidate(value)
+        if value:
+            pairs.append((_text(match.group("label")), value))
+    return pairs
+
+
+def _category_class_pairs(text: str) -> List[tuple[str, str]]:
+    """将正文/标题中的“第 1 类/第六类”保留为可追溯的原始品类。"""
+    if not text:
+        return []
+    pairs: List[tuple[str, str]] = []
+    seen = set()
+    for match in re.finditer(r"第\s*[1-6一二三四五六]\s*类", text, re.I):
+        value = _clean_candidate(match.group(0))
+        key = _norm(value)
+        if value and key not in seen:
+            seen.add(key)
+            pairs.append(("分类编号", value))
+    return pairs
+
+
+def _context_category_values(text: str) -> List[str]:
+    """在带有品牌标记的同一行补抓自然语言品类，如“品牌 X 冷却设备”。"""
+    if not text:
+        return []
+    brand_pattern = "|".join(re.escape(label) for label in _INLINE_BRAND_MARKERS)
+    values: List[str] = []
+    for line in re.split(r"[\r\n]+", text):
+        if not re.search(rf"(?:{brand_pattern})", line, re.I):
+            continue
+        hits = _category_alias_hits(line)
+        if not hits:
+            continue
+        top = hits[0]
+        if top.get("score", 0) < 12 or (len(hits) > 1 and top["score"] <= hits[1]["score"] * 1.35):
+            continue
+        values.extend(str(value) for value in top.get("evidence", []) if _clean_candidate(value))
+    return _dedupe(values)
+
+
 def _clean_candidate(value: Any) -> str:
-    text = _text(value).strip(" \t:：-—_，,;；")
+    text = _text(value).strip(" \t:：-—_，,;；()（）[]【】")
     if not text or len(text) > 180:
         return ""
     # 不能把业务标签、数量或整句说明当品牌/品类。
@@ -485,8 +569,35 @@ def extract_weee_items(
             sources.append(source)
 
     mail_text = _text(subject) + "\n" + _text(body)
-    brand_pairs = _label_value_pairs(mail_text, _BRAND_KEYS)
-    category_pairs = _label_value_pairs(mail_text, _CATEGORY_KEYS)
+
+    def unique_pairs(pairs: Iterable[tuple[str, str]]) -> List[tuple[str, str]]:
+        result: List[tuple[str, str]] = []
+        seen = set()
+        for label, value in pairs:
+            cleaned = _clean_candidate(value)
+            key = (_norm(label), _norm(cleaned))
+            if cleaned and key not in seen:
+                seen.add(key)
+                result.append((_text(label), cleaned))
+        return result
+
+    # 邮件里既有“品牌：X/品类：Y”，也常见“新增品牌X 第六类”这种没有冒号的写法。
+    brand_pairs = unique_pairs(
+        _label_value_pairs(mail_text, _BRAND_KEYS)
+        + _inline_marker_pairs(mail_text, _INLINE_BRAND_MARKERS)
+    )
+    category_pairs = unique_pairs(
+        _label_value_pairs(mail_text, _CATEGORY_KEYS)
+        + _inline_marker_pairs(mail_text, _INLINE_CATEGORY_MARKERS)
+    )
+    # 没有显式“类别/品类”标签时，保留“第 1 类/第六类”作为原始品类证据。
+    if not category_pairs:
+        category_pairs = _category_class_pairs(mail_text)
+    # “品牌 X 冷却设备”没有字段标签时，只有同一行存在品牌标记且分类表能
+    # 唯一归类，才把自然语言品类补出来，避免扫描模板正文造成大量误报。
+    if not category_pairs and brand_pairs:
+        category_pairs = [("产品分类表命中", value) for value in _context_category_values(mail_text)]
+
     if brand_pairs and category_pairs:
         # 同一封邮件通常按“品牌1/品类1；品牌2/品类2”排列；按出现顺序配对，
         # 数量不一致时只配已有项，其余仍保留为待人工核对，不跨行猜测。
