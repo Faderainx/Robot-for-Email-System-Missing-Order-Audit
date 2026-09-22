@@ -20,7 +20,7 @@ INTERNAL_RECIPIENT_SUFFIXES = tuple(
 # 企业邮箱常用“登录账号 + 公共收件地址”方式接收询单；公共地址应在本地环境变量中配置。
 DEFAULT_AUDIT_MAILBOX_ALIASES = {
     value.strip().lower()
-    for value in os.environ.get("AUDIT_MAILBOX_ALIASES", "audit@example.com").split(",")
+    for value in os.environ.get("AUDIT_MAILBOX_ALIASES", "report@example.com").split(",")
     if value.strip()
 }
 
