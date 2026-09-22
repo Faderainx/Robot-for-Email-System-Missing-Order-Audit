@@ -4,21 +4,24 @@
   F1 规则预分类 → 产出 valid_mails + filtered_mails，并记录命中依据
   F2 LLM 全量意图识别 → 对本次拉取的每封邮件逐封判断是否为新询单
 """
+import os
 import re
 from typing import List, Dict, Set, Optional
 
 
 # SOP 规定的 ECOPV 内部收件人域。这里保留为代码常量，避免外部表格缺一行
 # 就失去内部邮件防线；内部邮箱表仍用于精确地址记录与人工审计。
-INTERNAL_RECIPIENT_SUFFIXES = (
-    "@internal.example.invalid", "@internal.example.invalid", "@internal.example.invalid", "@example.invalid",
+INTERNAL_RECIPIENT_SUFFIXES = tuple(
+    value.strip().lower()
+    for value in os.environ.get("AUDIT_INTERNAL_RECIPIENT_SUFFIXES", "@example.invalid").split(",")
+    if value.strip()
 )
 
-# 企业邮箱常用“登录账号 + 公共收件地址”方式接收询单。登录账号可能是
-# mailbox@example.com，但客户邮件的 To 头写的是 report@example.com。
-# 这类公共地址属于本次审计入口，不能被当作“发给内部同事”而过滤。
+# 企业邮箱常用“登录账号 + 公共收件地址”方式接收询单；公共地址应在本地环境变量中配置。
 DEFAULT_AUDIT_MAILBOX_ALIASES = {
-    "report@example.com",
+    value.strip().lower()
+    for value in os.environ.get("AUDIT_MAILBOX_ALIASES", "audit@example.com").split(",")
+    if value.strip()
 }
 
 # 方法一：主题含注册类关键字（必须同时含业务词才算有效）

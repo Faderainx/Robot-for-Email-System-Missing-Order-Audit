@@ -19,7 +19,7 @@ SANITIZED_CONFIG = """email:
   imap_port: 993
   address: ''
   audit_addresses:
-    - report@example.com
+    - audit@example.com
   password: ''
   mailbox: INBOX
   cache_enabled: false

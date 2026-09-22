@@ -90,12 +90,12 @@ mail_audit_bot/
 ### M1 邮件读取模块 (mail_reader.py)
 
 - **协议**: IMAP SSL，服务器 `imap.mxhichina.com:993`
-- **邮箱**: 阿里企业邮箱 `mailbox@example.com`，使用客户端授权码登录
+- **邮箱**: 通过本地配置提供的企业邮箱，使用客户端授权码登录
 - **只读模式**: `conn.select("INBOX", readonly=True)`，不改变邮箱任何状态
 - **分批拉取**: 每 20 封重连一次，避免阿里邮箱 IMAP 5 分钟超时踢人
 - **日期兼容**: `fetch_mails(date_from, date_to)` 支持 datetime 对象和 `YYYY-MM-DD` 字符串
 - **离线解析**: 先批量拉取邮件原始字节，断开 IMAP 后再逐封解析正文和附件
-- **自身发送排除**: 发件人是 `mailbox@example.com` 的邮件标记 `skip_reason: "self_sent"`
+- **自身发送排除**: 发件人地址由本地配置提供，标记为 `skip_reason: "self_sent"`
 - **附件解析支持**: .xlsx .xls .pdf .docx .csv .txt .zip .rar .jpg .jpeg .png .bmp .tiff
 
 ### M2 邮件过滤模块 (mail_filter.py)

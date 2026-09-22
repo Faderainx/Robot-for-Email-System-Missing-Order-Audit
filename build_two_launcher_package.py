@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import shutil
 import zipfile
 from pathlib import Path
@@ -213,10 +214,12 @@ def assemble(
 
 
 def _scan_for_secrets(package_root: Path) -> list[str]:
-    forbidden = (
-        "[REMOVED_SECRET]",
-        "[REMOVED_SECRET]",
-        "mailbox@example.com",
+    forbidden = tuple(
+        value for value in (
+            os.environ.get("AUDIT_SECRET_SCAN_VALUE_1", ""),
+            os.environ.get("AUDIT_SECRET_SCAN_VALUE_2", ""),
+            os.environ.get("AUDIT_SECRET_SCAN_EMAIL", ""),
+        ) if value
     )
     hits: list[str] = []
     for path in package_root.rglob("*"):
