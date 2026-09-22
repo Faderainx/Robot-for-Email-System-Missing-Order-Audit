@@ -13,7 +13,7 @@ from typing import List, Dict, Set, Optional
 # 就失去内部邮件防线；内部邮箱表仍用于精确地址记录与人工审计。
 INTERNAL_RECIPIENT_SUFFIXES = tuple(
     value.strip().lower()
-    for value in os.environ.get("AUDIT_INTERNAL_RECIPIENT_SUFFIXES", "@example.invalid").split(",")
+    for value in os.environ.get("AUDIT_INTERNAL_RECIPIENT_SUFFIXES", "@example.com").split(",")
     if value.strip()
 )
 
