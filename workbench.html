@@ -26,7 +26,7 @@
     .container{width:100%;max-width:none;margin:0;align-self:stretch;height:auto;min-height:0;flex:1;overflow:hidden;display:flex;flex-direction:column;padding:14px 24px 16px}
     /* 顶部说明横条不再占用工作区高度；统计摘要直接贴近页面顶部。 */
     .banner{display:none}
-    .stats{gap:8px;margin:0 0 8px}
+    .stats{grid-template-columns:repeat(6,minmax(110px,1fr));gap:8px;margin:0 0 8px}
     .stat{padding:7px 12px;min-height:58px}
     .stat .num{font-size:21px;line-height:1}
     .stat .label{margin-top:4px;font-size:11px}
@@ -379,8 +379,8 @@
   };
   renderStats=function(){
     const active=(app.data?.mails||[]).filter(dateMatches),details=active.flatMap(m=>m.details||[]),filtered=(app.data?.filtered_mails||[]).filter(dateMatches),missing=(app.data?.missing_mails||[]).filter(dateMatches);
-    const c={mails:active.length,details:details.length,review:details.filter(d=>d.status==='review').length,confirmed:details.filter(d=>d.status==='confirmed').length,filtered:filtered.length};
-    $('#stats').innerHTML=[['mails','询单邮件',''],['details','业务明细',''],['review','待人工复核','amber'],['confirmed','已完成明细','green'],['filtered','已过滤邮件','red']].map(x=>`<div class="stat ${x[2]}"><div class="num">${c[x[0]]??0}</div><div class="label">${x[1]}</div></div>`).join('');
+    const c={mails:active.length,total:active.length+filtered.length,details:details.length,review:details.filter(d=>d.status==='review').length,confirmed:details.filter(d=>d.status==='confirmed').length,filtered:filtered.length};
+    $('#stats').innerHTML=[['total','邮件总数',''],['mails','询单邮件',''],['details','业务明细',''],['review','待人工复核','amber'],['confirmed','已完成明细','green'],['filtered','已过滤邮件','red']].map(x=>`<div class="stat ${x[2]}"><div class="num">${c[x[0]]??0}</div><div class="label">${x[1]}</div></div>`).join('');
     const filteredCount=$('#filtered-nav-count');if(filteredCount)filteredCount.textContent=filtered.length||'';
     const missingCount=$('#missing-nav-count');if(missingCount)missingCount.textContent=missing.length||'';
     setHistoryState();
@@ -830,8 +830,9 @@
     const items=details.flatMap(detail=>detail.weee.items||[]);
     const pending=items.filter(item=>item.category_class_status!=='matched'||!details.find(detail=>detail.weee.items?.includes(item))?.weee?.confirmed).length;
     const checked=items.length-pending;
-    const values=[['mails','德国WEEE邮件',''],['details','WEEE业务明细',''],['items','品牌/品类项目',''],['pending','待人工确认','amber'],['checked','已归类项目','green']];
-    const counts={mails:mails.length,details:details.length,items:items.length,pending,checked};
+    const allActive=(app.data?.mails||[]).filter(dateMatches),allFiltered=(app.data?.filtered_mails||[]).filter(dateMatches);
+    const values=[['total','邮件总数',''],['mails','德国WEEE邮件',''],['details','WEEE业务明细',''],['items','品牌/品类项目',''],['pending','待人工确认','amber'],['checked','已归类项目','green']];
+    const counts={total:allActive.length+allFiltered.length,mails:mails.length,details:details.length,items:items.length,pending,checked};
     $('#stats').innerHTML=values.map(item=>`<div class="stat ${item[2]}"><div class="num">${counts[item[0]]}</div><div class="label">${item[1]}</div></div>`).join('');
     const nav=$('#weee-nav-count');if(nav)nav.textContent=mails.length||'';
     const filteredCount=$('#filtered-nav-count');if(filteredCount)filteredCount.textContent=(app.data?.filtered_mails||[]).filter(dateMatches).length||'';

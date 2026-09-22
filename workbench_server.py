@@ -1947,6 +1947,10 @@ class WorkbenchStore:
                 # 当前过滤页包含阶段一过滤日志及人工转入的邮件。
                 "filtered": len(filtered_mails),
                 "overlap_removed": overlap_removed,
+                # 主询单队列与已过滤邮件已经在上面按邮件身份去重；
+                # 因此这个总数是当前快照的互斥邮件总数，不把同一封邮件重复计算。
+                "total_mails": len(mails) + len(filtered_mails),
+                # 保留旧字段，兼容已有前端、缓存和导出调用。
                 "unique_mails": len(mails) + len(filtered_mails),
             }
             history = self._sync_persistent_history(mails, filtered_mails)

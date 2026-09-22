@@ -2623,7 +2623,7 @@ def test_workbench_deduplicates_active_and_filtered_mail_counts():
             mail["sender"] == "same@example.com" for mail in snap["filtered_mails"]
         ), snap)
         check("工作台: 独立过滤邮件仍保留", len(snap["filtered_mails"]) == 1 and snap["filtered_mails"][0]["sender"] == "other@example.com", snap)
-        check("工作台: 输出重叠与唯一总数", snap["counts"].get("overlap_removed") == 1 and snap["counts"].get("unique_mails") == 2, snap["counts"])
+        check("工作台: 输出重叠与唯一总数", snap["counts"].get("overlap_removed") == 1 and snap["counts"].get("unique_mails") == 2 and snap["counts"].get("total_mails") == 2, snap["counts"])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
