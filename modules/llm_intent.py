@@ -595,6 +595,73 @@ class LLMIntentClient:
         )
         return step.payload
 
+    def classify_weee_categories(
+        self, items: List[dict], category_names: Optional[dict] = None
+    ) -> List[dict]:
+        """为规则无法唯一归类的德国 WEEE 项目提供候选类别。
+
+        这是辅助建议，不是自动确认：调用方必须保留原始品牌/品类证据，
+        并等待操作人员逐项选择后才可进入工单核对。返回值只接受 1--6 类。
+        """
+        if not self.enabled or not items:
+            return []
+        names = category_names or {
+            "1": "热交换设备", "2": "屏幕和显示设备", "3": "灯具和光源",
+            "4": "大型设备", "5": "小型设备", "6": "小型信息和电信设备",
+        }
+        payload = {
+            "类别定义": names,
+            "待判断项目": [
+                {
+                    "item_id": str(item.get("item_id") or index),
+                    "品牌": str(item.get("brand") or ""),
+                    "原始类别": str(item.get("category") or item.get("category_original") or ""),
+                    "证据": str(item.get("evidence") or "")[:1200],
+                }
+                for index, item in enumerate(items)
+                if isinstance(item, dict)
+            ],
+        }
+        system_prompt = (
+            "你是德国 ElektroG/WEEE 品类辅助分类器。只能依据给出的原始类别和证据，"
+            "在第1至第6类中提出候选；不能把品牌、公司名、表头、示例文字、数量或尺寸"
+            "单独当作类别。信息不足时 category_class 必须为空。只返回 JSON："
+            '{"results":[{"item_id":"","category_class":"1-6或空","confidence":"high|medium|low",'
+            '"reason":"不超过120字"}]}。不得输出 Markdown 或额外字段。'
+        )
+        result = self._call_api(
+            system_prompt,
+            json.dumps(payload, ensure_ascii=False) + "\n请只返回约定 JSON。",
+            purpose="weee_category_suggestion",
+            max_tokens=700,
+        )
+        if not isinstance(result, dict):
+            return []
+        raw_results = result.get("results")
+        if not isinstance(raw_results, list):
+            return []
+        accepted: List[dict] = []
+        for raw in raw_results:
+            if not isinstance(raw, dict):
+                continue
+            category_class = str(raw.get("category_class") or "").strip()
+            if category_class not in names:
+                category_class = ""
+            item_id = str(raw.get("item_id") or "").strip()
+            if not item_id:
+                continue
+            confidence = str(raw.get("confidence") or "low").strip().lower()
+            if confidence not in {"high", "medium", "low"}:
+                confidence = "low"
+            accepted.append({
+                "item_id": item_id,
+                "category_class": category_class,
+                "category_class_name": names.get(category_class, ""),
+                "confidence": confidence,
+                "reason": str(raw.get("reason") or "").strip()[:240],
+            })
+        return accepted
+
     def validate_extracted_fields(
         self,
         subject: str,

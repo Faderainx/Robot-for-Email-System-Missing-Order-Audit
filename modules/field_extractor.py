@@ -509,6 +509,7 @@ class FieldExtractor:
             body=mail.get("body_original") or body,
             attachments=mail.get("attachments") or [],
             project=project,
+            llm_client=self.llm_client,
         )
         weee_items = weee.get("items") or []
         return {

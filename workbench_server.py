@@ -98,6 +98,29 @@ def _json_list(value: Any) -> List[dict]:
     return [item for item in parsed if isinstance(item, dict)] if isinstance(parsed, list) else []
 
 
+def _weee_item_id(item: Dict[str, Any], index: int = 0) -> str:
+    """为品牌/品类项目生成跨刷新稳定的编号。"""
+    existing = _text(item.get("item_id"))
+    if existing:
+        return existing
+    seed = "|".join(
+        _text(item.get(key))
+        for key in ("brand", "category", "category_original", "source", "evidence")
+    ) or str(index)
+    return f"WEEE-{hashlib.sha1(seed.encode('utf-8', errors='ignore')).hexdigest()[:16].upper()}"
+
+
+def _with_weee_item_ids(items: Iterable[dict]) -> List[dict]:
+    result: List[dict] = []
+    for index, item in enumerate(items or []):
+        if not isinstance(item, dict):
+            continue
+        copied = dict(item)
+        copied["item_id"] = _weee_item_id(copied, index)
+        result.append(copied)
+    return result
+
+
 def _json_object(value: Any) -> Dict[str, Any]:
     """读取阶段一/阶段二写入的专项核对 JSON，失败时返回空对象。"""
     if isinstance(value, dict):
@@ -1125,16 +1148,22 @@ class WorkbenchStore:
         attachment_source = _text(row.get("附件明细来源"))
         attachment_evidence = _json_list(row.get("附件证据"))
         attachment_files = _json_list(row.get("附件文件索引"))
-        weee_items = _json_list(row.get("德国WEEE品类明细"))
+        weee_items = _with_weee_item_ids(_json_list(row.get("德国WEEE品类明细")))
         weee_check = _json_object(row.get("德国WEEE品类核对"))
         # WEEE 品牌/品类确认是独立于普通邮件字段的增量状态。人工确认后
         # 优先使用状态 JSON 中保存的项目快照，不会因刷新阶段一 Excel 把
         # 已处理的品牌、原始品类或人工映射类别覆盖掉。
         saved_weee_items = saved.get("weee_items") if isinstance(saved.get("weee_items"), list) else []
         if saved_weee_items:
-            weee_items = [item for item in saved_weee_items if isinstance(item, dict)]
+            weee_items = _with_weee_item_ids(saved_weee_items)
         saved_weee_status = _text(saved.get("weee_status"))
-        weee_confirmed = saved_weee_status == "confirmed"
+        if saved_weee_status == "confirmed":
+            for item in weee_items:
+                item.setdefault("weee_confirmed", True)
+        weee_confirmed = bool(
+            saved_weee_status == "confirmed"
+            or (weee_items and all(bool(item.get("weee_confirmed")) for item in weee_items))
+        )
         # 兼容旧阶段一结果：历史行可能因为申请表模板中的“WEEE产品信息”
         # 被标成专项开启，但当前业务项目实际是“德国包装法”。工作台不应
         # 在非 WEEE 业务卡上显示 WEEE 品类待核对；以标准化项目字段作排他闸门。
@@ -1197,7 +1226,10 @@ class WorkbenchStore:
             "weee": {
                 "enabled": weee_enabled,
                 "items": weee_items,
-                "status": "confirmed" if weee_confirmed else (_text(row.get("德国WEEE品类状态")) or "待工单核对"),
+                "status": "confirmed" if weee_confirmed else (
+                    "partial" if any(bool(item.get("weee_confirmed")) for item in weee_items)
+                    else (_text(row.get("德国WEEE品类状态")) or "待工单核对")
+                ),
                 "confirmed": weee_confirmed,
                 "confirmed_at": _text(saved.get("weee_confirmed_at")),
                 "confirmation_reason": _text(saved.get("weee_confirmation_reason")),
@@ -2512,7 +2544,7 @@ class WorkbenchStore:
         request_id = _text(payload.get("_request_id") or payload.get("request_id"))
         allowed = {
             "edit", "confirm", "confirm_detail", "return", "needs_info", "agent_confirm", "reset",
-            "confirm_weee",
+            "confirm_weee", "confirm_weee_item",
             "add_project", "delete_project", "bulk_confirm", "move_to_filtered",
             "move_to_review", "bulk_filter", "bulk_restore",
             "manual_workorder_result", "queue_workorder_retry",
@@ -2583,7 +2615,7 @@ class WorkbenchStore:
             elif action in {"confirm", "confirm_detail"}:
                 entry["status"] = "confirmed"
                 label = "人工确认当前业务" if action == "confirm_detail" else "人工确认整理完成"
-            elif action == "confirm_weee":
+            elif action in {"confirm_weee", "confirm_weee_item"}:
                 raw_items = payload.get("weee_items")
                 if not isinstance(raw_items, list):
                     raise ValueError("德国 WEEE 品牌/品类数据格式不正确")
@@ -2591,11 +2623,20 @@ class WorkbenchStore:
                     "1": "热交换设备", "2": "屏幕和显示设备", "3": "灯具和光源",
                     "4": "大型设备", "5": "小型设备", "6": "小型信息和电信设备",
                 }
+                previous_items = {
+                    _weee_item_id(item, index): item
+                    for index, item in enumerate(entry.get("weee_items") or [])
+                    if isinstance(item, dict)
+                }
+                target_item_id = _text(payload.get("weee_item_id"))
+                if action == "confirm_weee_item" and not target_item_id:
+                    raise ValueError("缺少要确认的德国 WEEE 项目编号")
                 normalized_items: List[Dict[str, Any]] = []
-                for raw_item in raw_items:
+                for index, raw_item in enumerate(raw_items):
                     if not isinstance(raw_item, dict):
                         continue
                     item = dict(raw_item)
+                    item["item_id"] = _weee_item_id(item, index)
                     item["brand"] = _text(item.get("brand"))
                     item["category"] = _text(item.get("category") or item.get("category_original"))
                     item["category_original"] = item["category"]
@@ -2610,15 +2651,27 @@ class WorkbenchStore:
                         item["category_class_status"] = "matched"
                     else:
                         item["category_class_status"] = _text(item.get("category_class_status")) or "unmatched"
+                    previous = previous_items.get(item["item_id"]) or {}
+                    was_confirmed = bool(item.get("weee_confirmed") or previous.get("weee_confirmed"))
+                    complete = bool(item["brand"] and item["category"] and category_class)
+                    if action == "confirm_weee":
+                        item["weee_confirmed"] = complete
+                    elif item["item_id"] == target_item_id:
+                        item["weee_confirmed"] = complete
+                    else:
+                        item["weee_confirmed"] = was_confirmed
                     normalized_items.append(item)
                 if not normalized_items:
                     raise ValueError("没有可保存的德国 WEEE 品牌/品类项目")
                 now = _now()
                 entry["weee_items"] = normalized_items
-                entry["weee_status"] = "confirmed"
+                all_confirmed = all(bool(item.get("weee_confirmed")) for item in normalized_items)
+                entry["weee_status"] = "confirmed" if all_confirmed else (
+                    "partial" if any(bool(item.get("weee_confirmed")) for item in normalized_items) else "pending"
+                )
                 entry["weee_confirmed_at"] = now
                 entry["weee_confirmation_reason"] = reason or "人工确认德国 WEEE 品牌与品类"
-                label = "确认德国 WEEE 品牌与品类"
+                label = "确认德国 WEEE 单项品牌与品类" if action == "confirm_weee_item" else "确认德国 WEEE 品牌与品类"
                 entry["events"].append({
                     "at": now,
                     "action": action,
@@ -2627,10 +2680,25 @@ class WorkbenchStore:
                     "mail_number": _text(payload.get("mail_number")),
                     "detail_number": _text(payload.get("detail_number")) or _detail_number_from_row({"_id": rid}),
                     "weee_item_count": len(normalized_items),
+                    "weee_item_id": target_item_id,
+                    "weee_item_confirmed": next(
+                        (bool(item.get("weee_confirmed")) for item in normalized_items if item.get("item_id") == target_item_id),
+                        all_confirmed,
+                    ),
                 })
                 entry["updated_at"] = now
                 _save_json(self.state_path, state)
-                return finish({"ok": True, "message": label, "weee_status": "confirmed", "item_count": len(normalized_items)})
+                return finish({
+                    "ok": True,
+                    "message": label,
+                    "weee_status": entry["weee_status"],
+                    "item_count": len(normalized_items),
+                    "weee_item_id": target_item_id,
+                    "weee_item_confirmed": next(
+                        (bool(item.get("weee_confirmed")) for item in normalized_items if item.get("item_id") == target_item_id),
+                        all_confirmed,
+                    ),
+                })
             elif action == "return":
                 entry["status"] = "returned"
                 label = "退回复核"

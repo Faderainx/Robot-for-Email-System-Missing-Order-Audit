@@ -134,6 +134,30 @@ _CATEGORY_LABEL_RE = re.compile(
     re.I,
 )
 
+# 申请表中常见的说明/示例不能作为真实品牌或品类。尤其是“例：设备电池，
+# Li，Apple，10g，3500个”会被旧版按分隔符拆成多条假品类。
+_EXAMPLE_MARKER_RE = re.compile(r"(?:例\s*[:：]|例如|示例|example|e\.g\.?|for\s+example)", re.I)
+_MEASUREMENT_ONLY_RE = re.compile(
+    r"^\s*\d+(?:\.\d+)?\s*(?:g|kg|克|千克|个|件|台|套|cm|mm|m|厘米|毫米|米|平方厘米|cm2)\s*$",
+    re.I,
+)
+_DIMENSION_ONLY_RE = re.compile(
+    r"^\s*(?:(?:单边|外部|最大|最小)?\s*尺寸\s*)?(?:小于|不超过|不大于|≤|<=|低于|少于)?\s*"
+    r"\d+(?:\.\d+)?\s*(?:cm|厘米|mm|毫米|m|米)(?:以下|以内)?\s*$",
+    re.I,
+)
+_PLACEHOLDER_RE = re.compile(
+    r"^(?:对应的?品牌(?:logo)?|品牌\s*\d*|品牌名|品牌名称|产品类型|产品类别|产品分类|商品类别|"
+    r"电池类型(?:\s*type)?|对应品牌|marke|type|类别|品类|包装材质类别|必填|选填)"
+    r"(?:\s*[（(].*)?$",
+    re.I,
+)
+_TEMPLATE_LABEL_RE = re.compile(
+    r"(?:信息在下列填写|需要的服务|注册信息|申请表|公司英文名称|公司中文名称|法人名字|"
+    r"营业执照号码|vat号|德国\s*vat|邮政编码|签字时间)",
+    re.I,
+)
+
 
 def _text(value: Any) -> str:
     return str(value or "").replace("\u3000", " ").strip()
@@ -423,11 +447,38 @@ def _clean_candidate(value: Any) -> str:
     if not text or len(text) > 180:
         return ""
     # 不能把业务标签、数量或整句说明当品牌/品类。
-    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+    if re.fullmatch(r"\d+(?:\.\d+)?", text) or _MEASUREMENT_ONLY_RE.fullmatch(text):
         return ""
     if re.search(r"^(?:无|未知|待确认|待定|暂无|n/?a|none|nil)$", text, re.I):
         return ""
+    if text in {"·", "•", "-", "—", "_"} or _PLACEHOLDER_RE.fullmatch(text):
+        return ""
+    # 这些是模板字段名，不是客户填写的产品数据；保留含有真实分类词的复合值，
+    # 例如“小型设备（必填）”仍可由分类表识别。
+    if _TEMPLATE_LABEL_RE.search(text) and not _category_alias_hits(text) and not _category_id_from_label(text):
+        return ""
     return text
+
+
+def _is_dimension_only(value: Any) -> bool:
+    """判断是否只有尺寸限制，没有独立的产品类别。"""
+    return bool(_DIMENSION_ONLY_RE.fullmatch(_text(value)))
+
+
+def _is_example_record(value: Any) -> bool:
+    return bool(_EXAMPLE_MARKER_RE.search(_text(value)))
+
+
+def _combine_dimension_categories(values: Iterable[str]) -> List[str]:
+    """把同一单元格拆出的“类别 + 尺寸”恢复为一个类别，丢弃孤立尺寸。"""
+    result: List[str] = []
+    for value in _dedupe(values):
+        if _is_dimension_only(value):
+            if result:
+                result[-1] = f"{result[-1]}，{value}"
+            continue
+        result.append(value)
+    return result
 
 
 def _record_values(record: Dict[str, Any], keys: Sequence[str]) -> List[str]:
@@ -528,6 +579,7 @@ def extract_weee_items(
     body: Any = "",
     attachments: Any = None,
     project: Any = "",
+    llm_client: Any = None,
 ) -> Dict[str, Any]:
     """提取德国 WEEE 的品牌/品类证据。
 
@@ -550,7 +602,15 @@ def extract_weee_items(
             if not isinstance(record, dict):
                 continue
             brands = _record_values(record, _BRAND_KEYS)
-            categories = _record_values(record, _CATEGORY_KEYS)
+            categories = _combine_dimension_categories(_record_values(record, _CATEGORY_KEYS))
+            evidence = _text(record.get("raw_text")) or " | ".join(_text(c) for c in record.get("cells") or [])
+            # 例示行只能作为模板说明。若其中没有真实分类表关键词，整行跳过，
+            # 避免把 Apple、10g、3500个等示例拆成业务项目。
+            if _is_example_record(evidence) and not any(
+                _category_alias_hits(value) or _category_id_from_label(value)
+                for value in categories
+            ):
+                continue
             if not brands and not categories:
                 continue
             source = (
@@ -563,7 +623,7 @@ def extract_weee_items(
                         "brand": brand,
                         "category": category,
                         "source": source,
-                        "evidence": _text(record.get("raw_text")) or " | ".join(_text(c) for c in record.get("cells") or []),
+                        "evidence": evidence,
                         "confidence": "high" if category else "medium",
                     })
             sources.append(source)
@@ -629,13 +689,25 @@ def extract_weee_items(
     for item in items:
         brand = _clean_candidate(item.get("brand"))
         category = _clean_candidate(item.get("category"))
+        if _is_dimension_only(category):
+            # 没有同一记录中的主体类别时，尺寸限制本身不构成 WEEE 类别。
+            continue
         if not brand and not category:
             continue
-        key = (_norm(brand), _norm(category))
+        # “小型设备”与“ 小型设备，单边尺寸小于50cm ”是同一业务项目；
+        # 尺寸只作为证据保留，不再生成第二张卡片。
+        category_key = _norm(re.sub(
+            r"[，,;；|]?\s*(?:(?:单边|外部|最大|最小)?\s*尺寸\s*)?(?:小于|不超过|不大于|≤|<=|低于|少于)?\s*"
+            r"\d+(?:\.\d+)?\s*(?:cm|厘米|mm|毫米|m|米)(?:以下|以内)?",
+            "",
+            category,
+            flags=re.I,
+        ))
+        key = (_norm(brand), category_key or _norm(category))
         current = merged.setdefault(key, {"brand": brand, "category": category, "sources": [], "evidences": [], "confidence": item.get("confidence", "medium")})
         if brand and not current.get("brand"):
             current["brand"] = brand
-        if category and not current.get("category"):
+        if category and len(category) > len(current.get("category") or ""):
             current["category"] = category
         for name in ("source", "evidence"):
             value = _text(item.get(name))
@@ -658,6 +730,46 @@ def extract_weee_items(
         item["category_candidates"] = classification.get("candidates", [])
         item["category_class_evidence"] = classification.get("evidence", [])
         item["category_rule_source"] = WEEE_RULE_SOURCE
+
+    # 规则没有唯一结果时才请求 LLM。LLM 仅写入候选建议，不把项目标记为
+    # matched；操作人员仍需对每一个品牌/品类项目单独选择并确认。
+    if llm_client is not None and getattr(llm_client, "enabled", False):
+        uncertain = [
+            item for item in result_items
+            if item.get("category_class_status") in {"unmatched", "ambiguous"}
+            and (item.get("brand") or item.get("category"))
+        ]
+        if uncertain:
+            for index, item in enumerate(result_items):
+                item.setdefault("item_id", str(index))
+            try:
+                suggestions = llm_client.classify_weee_categories(uncertain)
+            except Exception:
+                suggestions = []
+            by_id = {str(item.get("item_id")): item for item in uncertain}
+            for suggestion in suggestions or []:
+                target = by_id.get(str(suggestion.get("item_id")))
+                category_class = _text(suggestion.get("category_class"))
+                if not target or category_class not in WEEE_CATEGORY_DEFINITIONS:
+                    continue
+                candidate = {
+                    "category_class": category_class,
+                    "category_class_name": WEEE_CATEGORY_DEFINITIONS[category_class]["name"],
+                    "score": 0,
+                    "source": "LLM辅助建议",
+                }
+                if not any(
+                    str(existing.get("category_class")) == category_class
+                    for existing in target.get("category_candidates") or []
+                    if isinstance(existing, dict)
+                ):
+                    target.setdefault("category_candidates", []).append(candidate)
+                target["llm_category_suggestion"] = {
+                    "category_class": category_class,
+                    "category_class_name": candidate["category_class_name"],
+                    "confidence": _text(suggestion.get("confidence")) or "low",
+                    "reason": _text(suggestion.get("reason")),
+                }
     if not result_items:
         status = "pending"
     elif any(
@@ -724,7 +836,9 @@ def compare_weee_categories(items: Any, workorders: Iterable[Dict[str, Any]] = (
         if not category:
             checked.append({**item, "status": "pending", "reason": "邮件未提取到明确品类"})
             continue
-        mail_class = item.get("category_class") or ""
+        # LLM 只是候选建议；只有规则命中或人工保存为 matched 的项目才可
+        # 参与工单类别自动比对，避免未经确认的建议被当成最终结果。
+        mail_class = item.get("category_class") if item.get("category_class_status") == "matched" else ""
         if not mail_class:
             inferred = classify_weee_product(category)
             if inferred.get("status") == "matched":
