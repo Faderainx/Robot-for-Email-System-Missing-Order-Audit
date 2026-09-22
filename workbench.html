@@ -27,6 +27,8 @@
     /* 顶部说明横条不再占用工作区高度；统计摘要直接贴近页面顶部。 */
     .banner{display:none}
     .stats{grid-template-columns:repeat(6,minmax(110px,1fr));gap:8px;margin:0 0 8px}
+    @media(max-width:1200px){.stats{grid-template-columns:repeat(3,1fr)}}
+    @media(max-width:780px){.stats{grid-template-columns:repeat(2,1fr)}}
     .stat{padding:7px 12px;min-height:58px}
     .stat .num{font-size:21px;line-height:1}
     .stat .label{margin-top:4px;font-size:11px}
