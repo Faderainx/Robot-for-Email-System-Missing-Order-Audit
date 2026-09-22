@@ -5,6 +5,7 @@ import asyncio
 import subprocess
 import threading
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Set
@@ -14,7 +15,8 @@ from PyQt5.QtWidgets import (
     QPushButton, QLabel, QDateEdit, QFileDialog, QTextEdit,
     QProgressBar, QMessageBox, QGroupBox, QFrame, QTableWidget,
     QTableWidgetItem, QTabWidget, QSplitter, QStatusBar,
-    QLineEdit, QFormLayout, QRadioButton, QButtonGroup, QCheckBox, QComboBox
+    QLineEdit, QFormLayout, QRadioButton, QButtonGroup, QCheckBox, QComboBox,
+    QInputDialog
 )
 from PyQt5.QtCore import QDate, QThread, pyqtSignal, Qt
 from PyQt5.QtGui import QFont, QColor
@@ -42,6 +44,120 @@ INTERNAL_EMAIL_CACHE_FILE = os.path.join(
 WORKORDER_RETRY_QUEUE_FILE = os.path.join(
     APP_DIR, "storage", "workorder_retry_queue.json"
 )
+
+
+def _stage1_cache_root() -> Path:
+    """阶段一历史缓存按邮件日期范围分目录保存。"""
+    return Path(APP_DIR) / "output" / "stage1_email" / "cache"
+
+
+def _cache_date_text(value) -> str:
+    """把 GUI/线程传入的日期统一成可用于文件夹名的日期文本。"""
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d")
+    text = str(value or "").strip()
+    if len(text) >= 10:
+        candidate = text[:10].replace("/", "-")
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", candidate):
+            return candidate
+    return ""
+
+
+def _archive_stage1_cache(primary, review, filtered, date_from=None, date_to=None):
+    """保存一次阶段一结果，供操作人员按日期重新读取。
+
+    稳定输出文件仍写在 ``output/stage1_email``，这里额外复制到日期范围目录，
+    不会改变原有阶段二输入路径和工作台数据库。
+    """
+    primary_path = Path(str(primary or ""))
+    if not primary_path.is_file():
+        return None
+    start = _cache_date_text(date_from) or "unknown-start"
+    end = _cache_date_text(date_to) or start
+    folder = _stage1_cache_root() / f"{start}_to_{end}"
+    folder.mkdir(parents=True, exist_ok=True)
+    files = {}
+    for source, name in (
+        (primary, "to_workorder_list.xlsx"),
+        (review, "to_review_list.xlsx"),
+        (filtered, "filtered_mail_record.xlsx"),
+    ):
+        source_path = Path(str(source or ""))
+        if source_path.is_file():
+            target = folder / name
+            shutil.copy2(source_path, target)
+            files[name] = name
+    manifest = {
+        "schema": 1,
+        "date_from": start,
+        "date_to": end,
+        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "files": files,
+    }
+    with (folder / "manifest.json").open("w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, ensure_ascii=False, indent=2)
+    return str(folder)
+
+
+def _stage1_cache_options():
+    """返回可供 GUI 读取的日期缓存，按结束日期和生成时间倒序。"""
+    root = _stage1_cache_root()
+    options = []
+    if root.is_dir():
+        for folder in root.iterdir():
+            if not folder.is_dir():
+                continue
+            manifest_path = folder / "manifest.json"
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                continue
+            files = manifest.get("files") if isinstance(manifest, dict) else {}
+            if not isinstance(files, dict):
+                files = {}
+            primary = folder / str(files.get("to_workorder_list.xlsx", "to_workorder_list.xlsx"))
+            review = folder / str(files.get("to_review_list.xlsx", "to_review_list.xlsx"))
+            filtered = folder / str(files.get("filtered_mail_record.xlsx", "filtered_mail_record.xlsx"))
+            if not primary.is_file() and not review.is_file():
+                continue
+            date_from = str(manifest.get("date_from", "") or "")
+            date_to = str(manifest.get("date_to", "") or date_from)
+            created_at = str(manifest.get("created_at", "") or "")
+            label = f"{date_from} 至 {date_to}"
+            if created_at:
+                label += f"（缓存于 {created_at}）"
+            options.append({
+                "label": label,
+                "folder": str(folder),
+                "primary": str(primary) if primary.is_file() else "",
+                "review": str(review) if review.is_file() else "",
+                "filtered": str(filtered) if filtered.is_file() else "",
+                "date_from": date_from,
+                "date_to": date_to,
+            })
+    options.sort(key=lambda item: (item.get("date_to", ""), item.get("label", "")), reverse=True)
+    # 兼容升级前已经存在的稳定输出：新运行会自动归档，旧结果仍可先读取。
+    if not options:
+        for stage1_dir in (
+            Path(APP_DIR) / "output" / "stage1_email",
+            Path(APP_DIR) / "output",
+        ):
+            legacy_primary = stage1_dir / "to_workorder_list.xlsx"
+            legacy_review = stage1_dir / "to_review_list.xlsx"
+            if not (legacy_primary.is_file() or legacy_review.is_file()):
+                continue
+            legacy_filtered = stage1_dir / "filtered_mail_record.xlsx"
+            options.append({
+                "label": "当前最新阶段一结果（旧版未按日期归档）",
+                "folder": str(stage1_dir),
+                "primary": str(legacy_primary) if legacy_primary.is_file() else "",
+                "review": str(legacy_review) if legacy_review.is_file() else "",
+                "filtered": str(legacy_filtered) if legacy_filtered.is_file() else "",
+                "date_from": "",
+                "date_to": "",
+            })
+            break
+    return options
 
 
 def _workorder_retry_identity(row):
@@ -317,6 +433,15 @@ class WorkerThread(QThread):
         _ingest_workbench_database(all_rows, "active", primary, logger)
         filtered_path = os.path.join(os.path.dirname(str(primary)), "filtered_mail_record.xlsx")
         _ingest_workbench_database(filtered_mails, "filtered", filtered_path, logger)
+        cache_folder = _archive_stage1_cache(
+            primary,
+            secondary,
+            filtered_path,
+            date_from=self.date_from,
+            date_to=self.date_to,
+        )
+        if cache_folder:
+            logger.info(f"阶段一日期缓存已保存: {cache_folder}")
         logger.info("=" * 50)
         logger.info(f"[阶段一完成] 待查清单: {primary}")
         logger.info(f"[阶段一完成] 漏单复查: {secondary}")
@@ -1487,6 +1612,14 @@ class MainWindow(QMainWindow):
         self.btn_open_stage2_result.clicked.connect(lambda: self.open_excel(self.stage2_result_file))
         bottom_layout.addWidget(self.btn_open_stage2_result)
 
+        self.btn_load_stage1_cache = QPushButton("读取阶段一缓存")
+        self.btn_load_stage1_cache.setToolTip(
+            "按邮件日期选择已经保存的阶段一结果，不重新连接邮箱"
+        )
+        self.btn_load_stage1_cache.setEnabled(False)
+        self.btn_load_stage1_cache.clicked.connect(self.load_stage1_cache)
+        bottom_layout.addWidget(self.btn_load_stage1_cache)
+
         # 可视化人工复核工作台：始终使用正式持久历史，不向操作人员暴露测试会话切换。
         self.btn_open_workbench = QPushButton("打开人工复核工作台")
         self.btn_open_workbench.setToolTip(
@@ -1507,6 +1640,7 @@ class MainWindow(QMainWindow):
         self.stage2_result_file = ""
         self.stage2_input_path = None
         self.stage2_input_user_selected = False
+        self.stage1_cache_selection = None
         self.workbench_server = None
         # 允许打开上一次阶段一结果；若不存在，运行阶段一后自动启用。
         output_root = os.path.join(APP_DIR, "output")
@@ -1517,6 +1651,7 @@ class MainWindow(QMainWindow):
         self.btn_open_workbench.setEnabled(
             os.path.exists(categorized_primary) or os.path.exists(legacy_primary)
         )
+        self._refresh_stage1_cache_button()
         # 统一初始化控件可见性。
         self._on_mode_changed()
 
@@ -1563,6 +1698,32 @@ class MainWindow(QMainWindow):
             resolve_runtime_path(llm_cfg.get("audit_log_path"), "logs/llm_calls.jsonl")
         )
 
+    def _refresh_stage1_cache_button(self):
+        """有日期缓存或旧版稳定输出时，允许操作人员读取阶段一结果。"""
+        has_cache = bool(_stage1_cache_options())
+        output_root = Path(APP_DIR) / "output"
+        has_legacy = any(
+            (output_root / relative).is_file()
+            for relative in (
+                "stage1_email/to_workorder_list.xlsx",
+                "stage1_email/to_review_list.xlsx",
+                "to_workorder_list.xlsx",
+            )
+        )
+        self.btn_load_stage1_cache.setEnabled(has_cache or has_legacy)
+
+    @staticmethod
+    def _set_date_widget(widget, value):
+        """把缓存清单中的日期安全地恢复到日期控件。"""
+        text = str(value or "")[:10]
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+            return
+        try:
+            year, month, day = (int(part) for part in text.split("-"))
+            widget.setDate(QDate(year, month, day))
+        except (TypeError, ValueError):
+            return
+
     def load_session(self):
         """加载上次保存的时间范围、参考表路径和阶段二输入选择。"""
         if not os.path.exists(SESSION_FILE):
@@ -1579,6 +1740,20 @@ class MainWindow(QMainWindow):
             if date_to_str:
                 parts = date_to_str.split("-")
                 self.date_to.setDate(QDate(int(parts[0]), int(parts[1]), int(parts[2])))
+            # 恢复上次选择的阶段一日期缓存；文件不存在时保留当前默认结果，
+            # 不把旧电脑上的绝对路径继续带入新环境。
+            cached_primary = resolve_runtime_path(state.get("stage1_cache_primary"), None)
+            cached_review = resolve_runtime_path(state.get("stage1_cache_review"), None)
+            if cached_primary.is_file() or cached_review.is_file():
+                self.missing_file = str(cached_primary) if cached_primary.is_file() else ""
+                self.filtered_file = str(cached_review) if cached_review.is_file() else ""
+                self.btn_open_missing.setEnabled(bool(self.missing_file))
+                self.btn_open_filtered.setEnabled(bool(self.filtered_file))
+                self.btn_open_workbench.setEnabled(bool(self.missing_file or self.filtered_file))
+                self.stage1_cache_selection = {
+                    "primary": self.missing_file,
+                    "review": self.filtered_file,
+                }
             # 恢复邮箱汇总表路径
             agent_path = state.get("agent_table_path")
             agent_resolved = resolve_runtime_path(agent_path, "data/agent_emails.xlsx")
@@ -1678,6 +1853,16 @@ class MainWindow(QMainWindow):
                 getattr(self, "stage2_input_user_selected", False)
             ),
             "force_live_query": self.chk_force_live.isChecked(),
+            "stage1_cache_primary": (
+                app_relative_path(self.missing_file, None)
+                if getattr(self, "missing_file", "") and os.path.exists(self.missing_file)
+                else None
+            ),
+            "stage1_cache_review": (
+                app_relative_path(self.filtered_file, None)
+                if getattr(self, "filtered_file", "") and os.path.exists(self.filtered_file)
+                else None
+            ),
             "mode": mode,
         }
         try:
@@ -2090,9 +2275,14 @@ class MainWindow(QMainWindow):
         elif self.radio_stage1.isChecked():
             self.missing_file = primary_file
             self.filtered_file = secondary_file
+            self.stage1_cache_selection = {
+                "primary": primary_file,
+                "review": secondary_file,
+            }
             self.btn_open_missing.setEnabled(True)
             self.btn_open_filtered.setEnabled(True)
             self.btn_open_workbench.setEnabled(True)
+            self._refresh_stage1_cache_button()
             self.log(f"阶段一待查清单: {primary_file}")
             self.log(f"阶段一漏单复查: {secondary_file}")
         else:
@@ -2143,6 +2333,45 @@ class MainWindow(QMainWindow):
             os.startfile(filepath)
         else:
             QMessageBox.warning(self, "提示", "文件不存在")
+
+    def load_stage1_cache(self):
+        """按日期选择阶段一缓存，并将其作为当前工作台数据源。"""
+        options = _stage1_cache_options()
+        if not options:
+            QMessageBox.information(
+                self,
+                "没有可读取的缓存",
+                "当前还没有按日期保存的阶段一结果，请先运行一次“阶段一：邮件解析”。",
+            )
+            return
+        labels = [item["label"] for item in options]
+        label, ok = QInputDialog.getItem(
+            self,
+            "读取阶段一缓存",
+            "选择要读取的邮件日期范围：",
+            labels,
+            0,
+            False,
+        )
+        if not ok or not label:
+            return
+        selected = next((item for item in options if item["label"] == label), None)
+        if not selected:
+            return
+        self.missing_file = selected.get("primary", "")
+        self.filtered_file = selected.get("review", "")
+        self.stage1_cache_selection = selected
+        self.btn_open_missing.setEnabled(bool(self.missing_file))
+        self.btn_open_filtered.setEnabled(bool(self.filtered_file))
+        self.btn_open_workbench.setEnabled(bool(self.missing_file or self.filtered_file))
+        self._set_date_widget(self.date_from, selected.get("date_from"))
+        self._set_date_widget(self.date_to, selected.get("date_to"))
+        self.save_session()
+        self.log(
+            "已读取阶段一日期缓存: "
+            f"{selected.get('date_from') or '未知'} ~ {selected.get('date_to') or '未知'}；"
+            f"待查={self.missing_file or '无'}，复查={self.filtered_file or '无'}"
+        )
 
     def open_workbench(self):
         """启动本机人工复核工作台；原 PyQt GUI 和阶段流程保持不变。"""
