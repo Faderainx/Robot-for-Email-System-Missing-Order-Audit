@@ -1487,14 +1487,7 @@ class MainWindow(QMainWindow):
         self.btn_open_stage2_result.clicked.connect(lambda: self.open_excel(self.stage2_result_file))
         bottom_layout.addWidget(self.btn_open_stage2_result)
 
-        # 可视化人工复核工作台：不删除现有 GUI，只增加一个独立浏览器入口。
-        self.chk_workbench_test = QCheckBox("工作台测试模式（不读取正式历史）")
-        # 正式工作台默认沉淀历史；需要验证新规则时才由操作人员主动勾选测试模式。
-        self.chk_workbench_test.setChecked(False)
-        self.chk_workbench_test.setToolTip(
-            "勾选后每次打开都会使用新的临时会话，不读取或覆盖正式历史，也不会生成正式完成/未完成总表。"
-        )
-        bottom_layout.addWidget(self.chk_workbench_test)
+        # 可视化人工复核工作台：始终使用正式持久历史，不向操作人员暴露测试会话切换。
         self.btn_open_workbench = QPushButton("打开人工复核工作台")
         self.btn_open_workbench.setToolTip(
             "读取阶段一待查/人工补全结果，在浏览器中进行证据核对和人工确认"
@@ -1646,12 +1639,6 @@ class MainWindow(QMainWindow):
                 preferred_path=(stage2_in if self.stage2_input_user_selected else None)
             )
             self.chk_force_live.setChecked(bool(state.get("force_live_query", False)))
-            # 旧版本默认测试模式，会让新的持久留痕能力始终不生效；升级后只恢复
-            # 新版本明确保存的选择，旧会话一律落到正式持久模式。
-            if state.get("workbench_mode_schema") == 2:
-                self.chk_workbench_test.setChecked(bool(state.get("workbench_test_mode", False)))
-            else:
-                self.chk_workbench_test.setChecked(False)
             # 恢复运行模式
             mode = state.get("mode", "all")
             if mode == "stage1":
@@ -1691,8 +1678,6 @@ class MainWindow(QMainWindow):
                 getattr(self, "stage2_input_user_selected", False)
             ),
             "force_live_query": self.chk_force_live.isChecked(),
-            "workbench_test_mode": self.chk_workbench_test.isChecked(),
-            "workbench_mode_schema": 2,
             "mode": mode,
         }
         try:
@@ -2192,24 +2177,20 @@ class MainWindow(QMainWindow):
                 if os.path.exists(candidate):
                     filtered = candidate
 
-            # 测试模式每次打开均创建新会话，不能复用昨天的“已退回”等人工状态。
+            # 工作台始终读取并延续正式人工复核历史。
             # 先停掉旧 HTTP 服务，避免浏览器仍连接到旧状态实例。
             if self.workbench_server:
                 self.workbench_server.stop()
-            test_mode = self.chk_workbench_test.isChecked()
             self.workbench_server = WorkbenchServer(
                 primary_path=primary,
                 review_path=review,
                 filtered_path=filtered,
-                test_mode=test_mode,
+                test_mode=False,
             )
             url = self.workbench_server.start(open_browser=True)
             self.log(f"人工复核工作台已启动: {url}")
             self.log(f"工作台数据源: 阶段一缓存文件（待查={primary or '无'}，复查={review or '无'}）")
-            if test_mode:
-                self.log("工作台测试模式：仅读取本次阶段一输出，不读取历史人工状态")
-            else:
-                self.log("工作台正式模式：读取并延续历史人工复核状态")
+            self.log("工作台正式模式：读取并延续历史人工复核状态")
         except Exception as exc:
             self.log(f"[ERROR] 人工复核工作台启动失败: {exc}")
             QMessageBox.critical(self, "工作台启动失败", str(exc))
