@@ -1447,6 +1447,26 @@ class FieldExtractor:
             re.I,
         ):
             return "公司数量说明"
+        # 日期/数量后的“告知以下 2 家公司”“通知 3 家企业”会被公司后缀
+        # 正则截成一个看似主体的短片段，例如“24告知以下2家公司”。它是
+        # 说明句，不是客户公司；真正的英文/中文公司主体不会以这些叙述词开头。
+        if re.match(
+            r"^\d{1,4}\s*(?:告知|通知|提交|说明|列出|涉及|有)"
+            r".*(?:\d+\s*家\s*)?(?:公司|主体|企业)",
+            text,
+            re.I,
+        ):
+            return "公司数量说明"
+        # 英文公司名经常正好是两个首字母大写的词（如
+        # ``Twinklebelle Design Inc``）。必须先确认法定公司后缀，再判断
+        # “两个英文单词”是否像联系人姓名，否则真实 Inc/LLC 主体会被误删。
+        if re.search(
+            r"(?i)(?:CO\.?\s*,?\s*LTD\.?|LIMITED|LTD\.?|LLC|INC\.?|GMBH|"
+            r"GBR|B\.?V\.?|S\.?A\.?S|SAS|N\.?V\.?|PTE\.?\s*LTD\.?|"
+            r"PTY\.?\s*LTD\.?|CORPORATION|CORP\.?|S\.?L\.?)\s*$",
+            text,
+        ):
+            return ""
         # 申请表常把法人姓名单独列成一行（如 Huiming Wu）。没有公司后缀、
         # 只有英文姓名结构的候选不能作为客户主体；不确定时留空交人工。
         if re.fullmatch(r"[A-Z][a-z]{1,24}(?:\s+[A-Z][a-z]{1,24}){1,3}", text):
@@ -1875,6 +1895,12 @@ class FieldExtractor:
                         for p in self._extract_projects_by_rules(active_country + seg)
                     ]
                 company = self._company_substring(seg)
+                # 公司后缀正则可能从说明句中截出“24告知以下2家公司”一类
+                # 假主体；这类候选不能参与公司—项目分组，否则会把一封邮件
+                # 错误展开成额外业务明细。英文公司后缀(Inc/LLC 等)由噪声闸门
+                # 明确放行，真实英文公司不会再被“疑似联系人姓名”误删。
+                if company and self._customer_noise_reason(company):
+                    company = ""
                 codes = self._client_codes_in(seg)
                 if company:
                     # 新公司段: 若当前记录已凑齐(公司+组合)则先落账
@@ -1942,7 +1968,7 @@ class FieldExtractor:
             # 该名称不是客户主体，不能参与批量公司—项目映射。
             all_companies = [
                 company for company in all_companies
-                if self._customer_noise_reason(company) != "发件方说明句"
+                if not self._customer_noise_reason(company)
             ]
             global_projects = [
                 p["standard_name"] for p in self._extract_projects_by_rules(text)
@@ -1955,7 +1981,7 @@ class FieldExtractor:
                 chunk_companies = self._company_substrings(chunk)
                 chunk_companies = [
                     company for company in chunk_companies
-                    if self._customer_noise_reason(company) != "发件方说明句"
+                    if not self._customer_noise_reason(company)
                 ]
                 chunk_projects = [
                     p["standard_name"] for p in self._extract_projects_by_rules(chunk)
@@ -2092,6 +2118,36 @@ class FieldExtractor:
                 {"raw_value": f"申请表勾选: {name}", "standard_name": name}
                 for name in form.get("projects") or []
             ]
+            # 泛欧 8 国模板经常由代理复制上一单，旧国家/业务复选框会被
+            # 一并保留。若邮件主题已经明确只声明一个具体项目，则该声明
+            # 是本封邮件的业务范围闸门；仅对“泛欧/8国”模板启用，避免改变
+            # 其它自定义申请表中“主题写一个、表里勾多个”的既有规则。
+            form_filename = str(form.get("filename") or "")
+            subject_declared = self._drop_generic_epr(
+                self._extract_projects_by_rules(subject)
+            )
+            subject_names = list(dict.fromkeys(
+                str(item.get("standard_name") or "").strip()
+                for item in subject_declared
+                if str(item.get("standard_name") or "").strip()
+            ))
+            if (
+                len(subject_names) == 1
+                and len(projects) > 1
+                and re.search(r"泛欧|8\s*国|pan[- ]?epr|pan[- ]?europe", form_filename, re.I)
+                and any(p.get("standard_name") == subject_names[0] for p in projects)
+            ):
+                original_projects = [p.get("standard_name") for p in projects]
+                projects = [
+                    p for p in projects if p.get("standard_name") == subject_names[0]
+                ]
+                form = dict(form)
+                form["raw_checked_projects"] = original_projects
+                form["projects"] = [subject_names[0]]
+                form["subject_gate"] = subject_names[0]
+                self._log(
+                    f"泛欧申请表按主题项目闸门收敛: {original_projects} → {subject_names[0]}"
+                )
             # 混合场景: 同封邮件里若还有「旧式(无复选框)申请表」, 用主题做闸门补充。
             # 旧式表(如 荷兰EPR申请表.xlsx)把整张 国家×业务 网格都印在单元格里,
             # 直接文本扫描会炸出十几个错误的组合, 故只保留主题中声明过的组合。
